@@ -1,0 +1,5 @@
+/html/highlightjs
+/html/index.html
+/html/notes/*.html
+.zig-cache
+zig-out
