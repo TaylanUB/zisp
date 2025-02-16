@@ -171,13 +171,13 @@ Let's go back to considering the quiet bit a separate field:
     { sign == 0x1, exp == 0x7ff, quiet == 0x1, rest >= 0x1 } :: Negative
 
 But, I hear you say, the positive range is missing zero!  Worry not, for
-maths is wizardry.  We will actually store positive values as their unary
+maths is wizardry.  We will actually store positive values as their ones'
 complement (bitwise NOT) meaning that all bits being set is our zero, and
 only the LSB being set is the highest possible value.
 
 This must be combined with a bitwise OR mask, to ensure that the 13 highest
 of the 64 bits turn into the correct starting bit pattern for a signed NaN.
-Unpacking it is just as simple: Take the unary complement (bitwise NOT) and
+Unpacking it is just as simple: Take the ones' complement (bitwise NOT) and
 then use an AND mask to unset the 13 highest:
 
     POS_INT_PACK(x)   = ~x | 0xfff8000000000000
@@ -237,7 +237,8 @@ unset quiet bit, this would make our value an infinity, and in case of a set
 quiet bit it would give us a canonical quiet NaN.  Each of them is allowed
 any other payload than zero.
 
-### Pointers
+
+## Pointers
 
 It would seem that we have 51 bits left to represent a pointer (though we
 need to avoid the value zero).  But we only need 48 bits... or even less!
@@ -246,7 +247,7 @@ really need 45 of the 48 bits, given the least significant 3 will never be
 set.  This gives us a whole 6 free bits to tag pointers with!  If we have
 that much play room, we can do some crazy things.
 
-#### Foreign pointers
+### Foreign pointers
 
 Firstly, let's introduce the concept of a "foreign" pointer.  This means the
 pointer doesn't necessarily point to a Zisp object, and may not be 8-byte
@@ -269,7 +270,7 @@ essentially defined another fixnum range of 50 bits.  This can include the
 value zero, since the foreign bit being set ensures we don't step on the
 forbidden all-zero payload value.
 
-#### Zisp pointers
+### Zisp pointers
 
 Now let's look at what we can do with "native" Zisp pointers.
 
@@ -319,6 +320,13 @@ Let's use the term "indirect" for this tag, since "pointer" is already used:
 
     { pointer == 0x1, foreign == 0x0, indirect: u1, rest: u49 }
 
+Should these indirect pointers objects be mutable, then they may contain a
+null pointer; the forbidden zero value is avoided through the fact that the
+indirect bit is set.
+
+Hmm, indirect pointers may instead become weak pointers at some point!  This
+would fit perfectly since they can contain null.
+
 Direct or indirect makes no difference to the fact that the pointer value
 will be 8-byte aligned, so we still have 4 bits for more information about
 what's being pointed to.  Also, since the actual pointer value can never be
@@ -335,6 +343,10 @@ remaining 49 bits:
 The pointer value is extracted by masking the entire bit sequence, so it
 actually becomes a 48-bit value without further shifting.
 
+(This part of the article is kinda obsolete.  Implementation details are up
+for debate and we may or may not use bit shifting.  It's not that expensive
+of an operation, after all.)
+
 The tag can be used to tell us what we're pointing to, so that type checks
 often don't require following the pointer.  The memory location that's being
 pointed to may duplicate this information, since we may want to ensure that
@@ -347,22 +359,22 @@ represent, making sure to have an "other" wildcard for future extensions.
 The right side shows the value of the type tag when it's acquired by masking
 the 49-bit Zisp pointer payload.
 
-    0. String (Symbol) .... 0x0000000000000
-    1. Pair (List)          0x0000000000001
-    2. Vector ............. 0x0000000000002
-    3. Map (Hash-table)     0x0000000000003
-    4. Box ................ 0x0000000000004
-    5. Record               0x0000000000005
-    6. Class .............. 0x0000000000006
-    7. Instance             0x0000000000007
-    8. Text ............... 0x1000000000000
-    9. Byte-vector          0x1000000000001
-    10. Procedure ......... 0x1000000000002
-    11. Continuation        0x1000000000003
-    12. Port .............. 0x1000000000004
-    13. Error               0x1000000000005
-    14. Enum .............. 0x1000000000006
-    15. Other               0x1000000000007
+    0. String (Symbol) ... 0x0000000000000
+    1. Pair (List)         0x0000000000001
+    2. Vector ............ 0x0000000000002
+    3. Map (Hash-table)    0x0000000000003
+    4. Box ............... 0x0000000000004
+    5. Record              0x0000000000005
+    6. Class ............. 0x0000000000006
+    7. Instance            0x0000000000007
+    8. Text .............. 0x1000000000000
+    9. Byte-vector         0x1000000000001
+    10. Procedure ........ 0x1000000000002
+    11. Continuation       0x1000000000003
+    12. Port ............. 0x1000000000004
+    13. Error              0x1000000000005
+    14. Enum ............. 0x1000000000006
+    15. Other              0x1000000000007
 
 This list is likely to change; for example: errors should probably be class
 instances, continuations could be merged with procedures, and so on.  But
@@ -372,10 +384,72 @@ quite sufficient for avoiding a pointer de-reference in type checking.
 (Why is it so important to avoid following a pointer when checking a type?
 Who knows?  Did I say it was important?  Why look at me like that??)
 
-### Other values, including Unicode
+(Since I wrote this, I decided to use bit shifting after all, and the tags
+are straightforward values from 0 to 15.)
 
-WIP
 
+## Other values
+
+We still have one entire `2^51 - 1` value range left.  We will split it the
+following way.  This one uses a very simple partitioning scheme:
+
+    { tag: u3, payload: u48 }
+
+The following tags are defined:
+
+    001 = short string
+    010 = char (Unicode code point)
+    100 = singletons (false, true, etc.)
+
+Other tags are undefined and reserved for the future.  Note that 000 is
+missing, so we automatically avoid the forbidden zero payload.
+
+### What the heck is a "short string"?
+
+Remember that (strings are immutable)[symbols.html] in Zisp.  This allows us
+to use an amazing optimization where short strings can be represented as
+immediate values.
+
+We can't get to 56 bits (7 bytes), but 48 bits (6 bytes) fits perfectly into
+our payload!  So any interned string (equivalent to a Scheme symbol) in Zisp
+will in fact be an immediate value if 6 bytes or shorter, and doesn't need
+any heap allocation.  Awesome!
+
+There can still be uninterned strings that are 6 bytes or shorter, and
+calling intern on them would return the canonical, immediate version.
+
+### Unicode code points
+
+This is an easy one.  We have 48 bits, and only need 21.  Just write the
+Unicode code point into the payload: done.
+
+This value range may be split in the future to fit other things in it, as
+we've wasted a ton of bits here.
+
+### Singletons
+
+This 48-bit value range contains various singletons like Boolean values, the
+empty list aka null, and so on.
+
+This is even more wasteful than using 48 bits for Unicode, so again this
+value range may be partitioned further at some point.
+
+### Undefined ranges
+
+We have a whole 48-bit value range (sans one forbidden value) that's still
+unused, plus another 50-bit range (or two 49-bit ranges, or three 48-bit).
+
+It's incredible just how much stuff you can cram into a NaN.  I would have
+never thought it possible.
+
+Ours may just be the most sophisticated NaN-packing strategy ever devised,
+because I couldn't find any information on the web about the possibility of
+using both signaling and quiet NaNs.  All articles I've stumbled upon either
+claim that you must avoid signaling NaNs or quiet NaNs, or they take a naive
+approach to the subdivision of the available bit patterns and end up wasting
+tons of bit real estate.
+
+Stay tuned for the development of Zisp, because this is getting serious!
 
 <!--
 ;; Local Variables:

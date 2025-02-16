@@ -25,7 +25,7 @@ immutable lists transparently backed by arrays, to represent rest
 arguments.  But the following paper offers a very compelling
 alternative:
 
-https://legacy.cs.indiana.edu/~dyb/pubs/LaSC-3-3-pp229-244.pdf
+[A New Approach to Procedures with Variable Arity](https://legacy.cs.indiana.edu/~dyb/pubs/LaSC-3-3-pp229-244.pdf)
 
 Let's first summarize the paper, and then see how we can adapt its
 ideas for Zisp.

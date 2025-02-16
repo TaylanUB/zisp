@@ -69,5 +69,3 @@ test "fuzz example" {
     };
     try std.testing.fuzz(Context{}, Context.testOne, .{});
 }
-
-test "nan" {}
