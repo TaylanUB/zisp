@@ -21,7 +21,7 @@ pub fn assert(v: Value) void {
 const fixnum_min = std.math.minInt(i52) + 1;
 const fixnum_max = std.math.maxInt(i52) - 1;
 
-fn isValidRange(int: i64) bool {
+pub fn isValidRange(int: i64) bool {
     return fixnum_min < int and int < fixnum_max;
 }
 

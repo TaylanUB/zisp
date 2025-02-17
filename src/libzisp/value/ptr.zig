@@ -88,15 +88,15 @@ pub fn packWeak(ptr: *anyopaque, tag: Tag) Value {
 }
 
 // Unpacks weak as well; no need for a separate fn.
-pub fn unpack(v: Value) struct { ptr: *anyopaque, tag: Tag } {
+pub fn unpack(v: Value) PtrAndTag {
     assertZisp(v);
-    return untagPtr(v.ptr.value.tagged);
+    return untagPtr(v.ptr.value);
 }
 
 // Weak pointers may be null.
 pub fn isNull(v: Value) bool {
     assertWeak(v);
-    const ptr, _ = untagPtr(v.ptr.value.tagged);
+    const ptr, _ = untagPtr(v.ptr.value);
     return @intFromPtr(ptr) == 0;
 }
 
@@ -106,36 +106,38 @@ pub fn tagPtr(ptr: *anyopaque, tag: Tag) u49 {
     return untagged << 1 | @intFromEnum(tag);
 }
 
-pub fn untagPtr(tagged: 49) struct { ptr: *anyopaque, tag: Tag } {
+pub const PtrAndTag = struct { *anyopaque, Tag };
+
+pub fn untagPtr(tagged: u49) PtrAndTag {
     const untagged: u49 = tagged >> 1 & 0xfffffffffff0;
     const ptr: *anyopaque = @ptrFromInt(untagged);
     const int: u4 = @truncate(tagged);
     const tag: Tag = @enumFromInt(int);
-    return .{ .ptr = ptr, .tag = tag };
+    return .{ ptr, tag };
 }
 
 pub const Tag = enum(u4) {
-    /// 1. Strings / Symbols
+    /// 0. Strings / Symbols
     string,
-    /// 2. Bignums / Ratnums
+    /// 1. Bignums / Ratnums
     number,
-    /// 3. Pairs ([2]Value)
+    /// 2. Pairs ([2]Value)
     pair,
-    /// 4. Vector, bytevector, etc.
+    /// 3. Vector, bytevector, etc.
     array,
-    /// 5. Ordered hash table
+    /// 4. Ordered hash table
     table,
-    /// 6. String buffer
+    /// 5. String buffer
     text,
-    /// 7. Class, interface, etc.
+    /// 6. Class, interface, etc.
     role,
-    /// 8. Instance, basically
+    /// 7. Instance, basically
     actor,
-    /// 9. I/O Port
+    /// 8. I/O Port
     port,
-    /// 10. Procedure
+    /// 9. Procedure
     proc,
-    /// 11. Continuation
+    /// 10. Continuation
     cont,
     /// Other
     other = 15,

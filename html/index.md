@@ -22,3 +22,7 @@ ramblings of a madman.
 * [Object-oriented programming](notes/oop.html)
 * [Equality and equivalence semantics](notes/equal.html)
 * [NaN-packing](notes/nan.html)
+
+Temporary source repo before I set up my own git server:
+
+[Zisp on GitHub](https://github.com/TaylanUB/zisp/)

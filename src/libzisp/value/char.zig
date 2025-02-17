@@ -15,10 +15,10 @@ pub fn assert(v: Value) void {
 }
 
 pub fn pack(c: u21) Value {
-    return .{ .char = .{c} };
+    return .{ .char = .{ .value = c } };
 }
 
 pub fn unpack(v: Value) u21 {
     assert(v);
-    return v.char.value;
+    return @truncate(v.char.value);
 }

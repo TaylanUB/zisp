@@ -100,8 +100,13 @@
 // into 6 bytes or less will be stored as an immediate value, not requiring any
 // heap allocation or interning.  (It's implicitly interned.)
 //
-// There may still be uninterned strings on the heap that are just as short.
-// Calling intern on them will return the equivalent small string.
+// The null byte serves as a terminator and cannot appear in these strings; a
+// string that short but actually containing a null byte will need to be heap
+// allocated like other strings.
+//
+// There may also be uninterned strings on the heap that are also as short but
+// ended up on the heap due to being uninterned.  Calling intern on them will
+// return the equivalent small string.
 //
 // Unicode code points need a maximum of 21 bits, yet we have 48 available.
 // This may be exploited for a future extension.
@@ -110,10 +115,10 @@
 // dozen singleton values (false, true, null, and so on).  As such, this range
 // of bit patterns may be subdivided further in the future.
 //
-// And on top of all that we still have two 50-bit ranges left!
+// And on top of all that we still have a 48-bit and a 50-bit range left!
 //
-// The forbidden value 4, Positive Infinity, is in one of the two undefined
-// value ranges.
+// The forbidden value 4, Positive Infinity, is in the 48-bit undefined value
+// range starting with the 000 tag.
 //
 
 // Here's the original article explaining the strategy:
@@ -133,8 +138,9 @@ pub const ptr = @import("value/ptr.zig");
 
 pub const sstr = @import("value/sstr.zig");
 pub const char = @import("value/char.zig");
-pub const misc = @import("value/misc.zig");
 pub const boole = @import("value/boole.zig");
+pub const nil = @import("value/nil.zig");
+pub const eof = @import("value/eof.zig");
 
 /// To fill up the u11 exponent part of a NaN.
 const FILL = 0x7ff;
@@ -142,6 +148,7 @@ const FILL = 0x7ff;
 /// Represents a Zisp value/object.
 pub const Value = packed union {
     double: f64,
+    bits: u64,
 
     nan: packed struct {
         rest: u51,
@@ -178,7 +185,7 @@ pub const Value = packed union {
     sstr: packed struct {
         // packed struct cannot contain array
         value: u48,
-        tag: Tag = .str,
+        tag: Tag = .sstr,
         ptr: bool = false,
         _: u11 = FILL,
         fixnum: bool = false,
@@ -186,7 +193,7 @@ pub const Value = packed union {
 
     char: packed struct {
         value: u48,
-        tag: u3 = 2,
+        tag: Tag = .char,
         ptr: bool = false,
         _: u11 = FILL,
         fixnum: bool = false,
@@ -194,13 +201,13 @@ pub const Value = packed union {
 
     misc: packed struct {
         value: u48,
-        tag: u3 = 3,
+        tag: Tag = .misc,
         ptr: bool = false,
         _: u11 = FILL,
         fixnum: bool = false,
     },
 
-    const Tag = enum(u3) { str = 1, char = 2, misc = 3 };
+    const Tag = enum(u3) { sstr = 1, char = 2, misc = 3 };
 
     const Self = @This();
 
@@ -209,13 +216,8 @@ pub const Value = packed union {
         std.debug.dumpHex(std.mem.asBytes(&self));
     }
 
-    /// Checks for any IEEE 754 NaN.
-    pub fn isNan(self: Self) bool {
-        return self.nan.exp == FILL;
-    }
-
     /// Checks for a Zisp value (non-double) packed into a NaN.
     pub fn isPacked(self: Self) bool {
-        return self.isNan() and self.nan.rest != 0;
+        return self.nan.exp == FILL and self.nan.rest != 0;
     }
 };
