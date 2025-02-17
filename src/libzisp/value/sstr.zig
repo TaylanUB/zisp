@@ -59,7 +59,7 @@ pub fn unpack(v: Value) struct { [6]u8, u3 } {
     const src: *const [6]u8 = @ptrCast(&v.sstr.value);
     @memcpy(&s, src);
     for (0..6) |i| {
-        if (s[i] == 0) return .{ s, @truncate(i) };
+        if (s[i] == 0) return .{ s, @intCast(i) };
     }
     return .{ s, 6 };
 }
