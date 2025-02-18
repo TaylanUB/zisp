@@ -1,11 +1,14 @@
 const std = @import("std");
+const value = @import("../value.zig");
+const gc = @import("../gc.zig");
 
-const Value = @import("../value.zig").Value;
+const Bucket = gc.Bucket;
+const Value = value.Value;
 
 // Zig API
 
 pub fn check(v: Value) bool {
-    return v.isPacked() and v.ptr.is_ptr;
+    return v.isPtr();
 }
 
 pub fn assert(v: Value) void {
@@ -18,7 +21,7 @@ pub fn assert(v: Value) void {
 // Foreign Pointers
 
 pub fn checkForeign(v: Value) bool {
-    return check(v) and v.ptr.foreign;
+    return check(v) and v.ptr.is_foreign;
 }
 
 pub fn assertForeign(v: Value) void {
@@ -28,151 +31,166 @@ pub fn assertForeign(v: Value) void {
     }
 }
 
-pub fn packForeign(int: u50) Value {
-    return .{ .fptr = .{int} };
+pub fn checkForeignRange(ptr: *anyopaque) bool {
+    const int = @intFromPtr(ptr);
+    return int <= std.math.maxInt(u50);
 }
 
-pub fn unpackForeign(v: Value) u64 {
+fn assertForeignRange(ptr: *anyopaque) void {
+    if (!checkForeignRange(ptr)) {
+        std.debug.print("foreign pointer out of range: {}\n", .{ptr});
+        @panic("foreign pointer out of range");
+    }
+}
+
+pub fn packForeign(ptr: *anyopaque) Value {
+    assertForeignRange(ptr);
+    const int: u50 = @intCast(@intFromPtr(ptr));
+    return .{ .fptr = .{ .value = int } };
+}
+
+pub fn unpackForeign(v: Value) *anyopaque {
     assertForeign(v);
-    return v.ptr.value.foreign;
+    return @ptrFromInt(v.fptr.value);
 }
 
 // Zisp Pointers
 
-pub fn checkZisp(v: Value) bool {
-    return check(v) and !v.ptr.foreign;
+fn _checkZisp(v: Value) bool {
+    return check(v) and !v.ptr.is_foreign;
 }
 
-pub fn assertZisp(v: Value) void {
-    if (!checkZisp(v)) {
+fn _assertZisp(v: Value) void {
+    if (!_checkZisp(v)) {
         v.dump();
         @panic("not zisp pointer");
     }
 }
 
 pub fn checkWeak(v: Value) bool {
-    return checkZisp(v) and v.ptr.weak;
+    return _checkZisp(v) and v.zptr.is_weak;
 }
 
 pub fn assertWeak(v: Value) void {
     if (!checkWeak(v)) {
         v.dump();
-        @panic("not weak zisp pointer");
+        @panic("not zisp weak pointer");
     }
 }
 
-pub fn checkNormal(v: Value) bool {
-    return checkZisp(v) and !v.ptr.weak;
+pub fn checkZisp(v: Value, tag: Tag) bool {
+    return _checkZisp(v) and unpack(v).@"1" == tag;
 }
 
-pub fn assertNormal(v: Value) void {
-    if (!checkNormal(v)) {
+pub fn assertZisp(v: Value, tag: Tag) void {
+    if (!checkZisp(v, tag)) {
         v.dump();
-        @panic("not normal zisp pointer");
+        @panic("not zisp pointer or wrong tag");
     }
 }
 
-pub fn packZisp(ptr: *anyopaque, tag: Tag, weak: bool) Value {
-    return .{ .ptr = .{
-        .value = tagPtr(ptr, tag),
-        .weak = weak,
+pub fn checkStrong(v: Value) bool {
+    return _checkZisp(v) and !v.zptr.is_weak;
+}
+
+pub fn assertStrong(v: Value) void {
+    if (!checkStrong(v)) {
+        v.dump();
+        @panic("not zisp strong pointer");
+    }
+}
+
+pub fn packZisp(ptr: [*]Bucket, tag: Tag, is_weak: bool) Value {
+    return .{ .zptr = .{
+        .tagged_value = tagPtr(ptr, tag),
+        .is_weak = is_weak,
     } };
 }
 
-pub fn pack(ptr: *anyopaque, tag: Tag) Value {
+pub fn pack(ptr: [*]Bucket, tag: Tag) Value {
     return packZisp(ptr, tag, false);
 }
 
-pub fn packWeak(ptr: *anyopaque, tag: Tag) Value {
+pub fn packWeak(ptr: [*]Bucket, tag: Tag) Value {
     return packZisp(ptr, tag, true);
 }
 
 // Unpacks weak as well; no need for a separate fn.
-pub fn unpack(v: Value) PtrAndTag {
-    assertZisp(v);
-    return untagPtr(v.ptr.value);
+pub fn unpack(v: Value) struct { [*]Bucket, Tag } {
+    _assertZisp(v);
+    return untagPtr(v.zptr.tagged_value);
 }
 
-// Weak pointers may be null.
-pub fn isNull(v: Value) bool {
+pub fn setWeakNull(v: *Value) void {
+    assertWeak(v.*);
+    v.zptr.tagged_value = 0;
+}
+
+pub fn isWeakNull(v: Value) bool {
     assertWeak(v);
-    const ptr, _ = untagPtr(v.ptr.value);
-    return @intFromPtr(ptr) == 0;
+    return v.zptr.tagged_value == 0;
 }
 
-pub fn tagPtr(ptr: *anyopaque, tag: Tag) u49 {
-    const int: u64 = @intFromPtr(ptr);
-    const untagged: u49 = @truncate(int);
-    return untagged << 1 | @intFromEnum(tag);
+fn tagPtr(ptr: [*]Bucket, tag: Tag) u48 {
+    const int: usize = @intFromPtr(ptr);
+    const untagged: u48 = @intCast(int);
+    return untagged | @intFromEnum(tag);
 }
 
-pub const PtrAndTag = struct { *anyopaque, Tag };
-
-pub fn untagPtr(tagged: u49) PtrAndTag {
-    const untagged: u49 = tagged >> 1 & 0xfffffffffff0;
-    const ptr: *anyopaque = @ptrFromInt(untagged);
-    const int: u4 = @truncate(tagged);
+fn untagPtr(tagged: u48) struct { [*]Bucket, Tag } {
+    const untagged: u48 = tagged & 0xfffffffffff8;
+    const ptr: [*]Bucket = @ptrFromInt(untagged);
+    const int: u3 = @truncate(tagged);
     const tag: Tag = @enumFromInt(int);
     return .{ ptr, tag };
 }
 
-pub const Tag = enum(u4) {
+pub const Tag = enum(u3) {
     /// 0. Strings / Symbols
     string,
     /// 1. Bignums / Ratnums
     number,
     /// 2. Pairs ([2]Value)
     pair,
-    /// 3. Vector, bytevector, etc.
-    array,
-    /// 4. Ordered hash table
-    table,
-    /// 5. String buffer
+    /// 3. Collections: Vector, table, etc.
+    coll,
+    /// 4. OOP: Classes, instances, etc.
+    oop,
+    /// 5. String buffers
     text,
-    /// 6. Class, interface, etc.
-    role,
-    /// 7. Instance, basically
-    actor,
-    /// 8. I/O Port
-    port,
-    /// 9. Procedure
+    /// 6. Procedures
     proc,
-    /// 10. Continuation
-    cont,
-    /// Other
-    other = 15,
+    /// 7. Others
+    other,
 };
 
 // Zisp API
 
 pub fn predForeign(v: Value) Value {
-    return Value.boole.pack(checkForeign(v));
+    return value.boole.pack(checkForeign(v));
 }
 
 pub fn makeWeak(v: Value) Value {
-    assertNormal(v);
+    assertStrong(v);
     var copy = v;
-    copy.ptr.weak = true;
+    copy.zptr.is_weak = true;
     return copy;
 }
 
 pub fn predWeak(v: Value) Value {
-    const isWeak = checkWeak(v);
-    return Value.boole.pack(isWeak);
+    return value.boole.pack(checkWeak(v));
 }
 
 pub fn predWeakNull(v: Value) Value {
-    assertWeak(v);
-    return Value.boole.pack(v.ptr.weak);
+    return value.boole.pack(isWeakNull(v));
 }
 
 pub fn getWeak(v: Value) Value {
-    assertWeak(v);
-    if (isNull(v)) {
-        return Value.boole.pack(false);
+    if (isWeakNull(v)) {
+        return value.boole.f;
     } else {
         var copy = v;
-        copy.ptr.weak = false;
+        copy.zptr.is_weak = false;
         return copy;
     }
 }

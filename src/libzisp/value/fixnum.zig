@@ -1,12 +1,13 @@
 const std = @import("std");
+const value = @import("../value.zig");
 
-const Value = @import("../value.zig").Value;
+const Value = value.Value;
 
 // Zig API
 
 /// Checks for a Zisp fixnum.
 pub fn check(v: Value) bool {
-    return v.isPacked() and v.fixnum.is_fixnum;
+    return v.isFixnum();
 }
 
 /// Asserts check().
@@ -77,7 +78,7 @@ pub fn unpack(v: Value) i64 {
 // Zisp API
 
 pub fn pred(v: Value) Value {
-    return Value.boole.pack(check(v));
+    return value.boole.pack(check(v));
 }
 
 pub fn add(v1: Value, v2: Value) Value {

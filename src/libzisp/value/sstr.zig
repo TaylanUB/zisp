@@ -5,10 +5,7 @@ const Value = @import("../value.zig").Value;
 // Zig API
 
 pub fn check(v: Value) bool {
-    return v.isPacked() and
-        !v.sstr.fixnum and
-        !v.sstr.ptr and
-        v.sstr.tag == .sstr;
+    return v.isOther(.sstr);
 }
 
 pub fn assert(v: Value) void {
@@ -41,25 +38,22 @@ fn assertValidSstr(s: []const u8) void {
 
 // Different ways of doing the following have been tested, including manual
 // shifting and bit masking, but memcpy always wins easily according to our
-// micro-benchmarks, both under ReleaseSafe and under ReleaseFast.
+// micro-benchmarks, under both ReleaseSafe and ReleaseFast.
 
 pub fn pack(s: []const u8) Value {
     assertValidSstr(s);
-    var v = Value{ .sstr = .{ .value = 0 } };
-    const dest: [*]u8 = @ptrCast(&v.sstr.value);
+    var v = Value{ .sstr = .{ .string = 0 } };
+    const dest: [*]u8 = @ptrCast(&v.sstr.string);
     @memcpy(dest, s);
     return v;
 }
 
-// It's tempting to inline for here to eliminate the if statement or prevent
-// need of @truncate but all alternatives were a little slower.
-
 pub fn unpack(v: Value) struct { [6]u8, u3 } {
-    var s: [6]u8 = undefined;
-    const src: *const [6]u8 = @ptrCast(&v.sstr.value);
-    @memcpy(&s, src);
-    for (0..6) |i| {
-        if (s[i] == 0) return .{ s, @intCast(i) };
+    const s: [6]u8 = @bitCast(v.sstr.string);
+    inline for (0..6) |i| {
+        if (s[i] == 0) return .{ s, i };
     }
     return .{ s, 6 };
 }
+
+// No Zisp API for sstr specifically, since it's a string.  See string.zig.

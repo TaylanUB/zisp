@@ -58,28 +58,26 @@
 //
 // === Pointers ===
 //
-// Pointers are further subdivided as follows based on the remaining 51 bits:
+// Pointers are further subdivided as follows based on the remaining 51 bits,
+// with the first three bits used as a sort of tag:
 //
-//   MSb = 1          :: Foreign Pointer (or a "special 50-bit fixnum")
+//   000   :: Pointer to Zisp heap object (string, vector, etc.)
 //
-//   MSb = 0, SSb = 0 :: Pointer to heap object (string, vector, etc.)
+//   001   :: Weak pointer to Zisp heap object
 //
-//   MSb = 0, SSb = 1 :: Weak pointer to heap object
+//   01.   :: Undefined
 //
-//   (SSb = Second-most significant bit)
+//   1..   :: Undefined
 //
-// This means regular pointers to the Zisp heap are 49 bits.  Of these, we only
-// really need 45, since 64-bit platforms are in practice limited to 48-bit
-// addresses, and allocations happen at 8-byte boundaries, meaning the least
-// significant 3 bit are always 0.  Thus, we are able to store 4-bit tags in
-// those 49-bit pointers alongside the actual, multiple-of-8, 48-bit address.
-//
-// Note that foreign pointers avoid stepping on any forbidden value, thanks to
-// bit 51 being set.
+// This means pointers to the Zisp heap are 48 bits.  Of those, we only really
+// need 45, since 64-bit platforms are in practice limited to 48-bit addresses,
+// and allocations happen at 8-byte boundaries, meaning the least significant 3
+// bit are always 0.  Thus, we are able to store yet another 3-bit tag in those
+// 48-bit pointers alongside the actual, multiple-of-8, 48-bit address.
 //
 // The forbidden value 3, Positive cqNaN, is avoided thanks to the fact that a
 // regular Zisp heap pointer can never be null.  Weak pointers, which can be
-// null, avoid stepping on that forbidden value thanks to bit 50 being set.
+// null, avoid stepping on that forbidden value thanks to bit 49 being set.
 //
 //
 // === Other values ===
@@ -88,7 +86,7 @@
 //
 //   000   :: Undefined
 //
-//   001   :: Small string
+//   001   :: Short string
 //
 //   010   :: Unicode code point
 //
@@ -106,14 +104,16 @@
 //
 // There may also be uninterned strings on the heap that are also as short but
 // ended up on the heap due to being uninterned.  Calling intern on them will
-// return the equivalent small string.
+// return the equivalent short string.
 //
 // Unicode code points need a maximum of 21 bits, yet we have 48 available.
 // This may be exploited for a future extension.
 //
 // Similarly, it's extremely unlikely that we will ever need more than a few
 // dozen singleton values (false, true, null, and so on).  As such, this range
-// of bit patterns may be subdivided further in the future.
+// of bit patterns may be subdivided in the future.  Right now, only the lowest
+// 8 bits are allowed to be set, with the other 40 being reserved, so there's a
+// limit of 256 singleton values that can be defined.
 //
 // And on top of all that we still have a 48-bit and a 50-bit range left!
 //
@@ -142,72 +142,109 @@ pub const boole = @import("value/boole.zig");
 pub const nil = @import("value/nil.zig");
 pub const eof = @import("value/eof.zig");
 
+pub const pair = @import("value/pair.zig");
+
 /// To fill up the u11 exponent part of a NaN.
 const FILL = 0x7ff;
 
 /// Represents a Zisp value/object.
 pub const Value = packed union {
+    /// To get the value as a regular double.
     double: f64,
+
+    /// To get an agnostic value for direct comparison with == i.e. eq?.
     bits: u64,
 
-    nan: packed struct {
+    // Some of the structs below are just for inspection, whereas others are to
+    // initialize a new value of that category as well as read it that way.
+
+    /// Inspection through the lens of the general IEEE 754 double layout.
+    ieee: packed struct {
         rest: u51,
-        quiet: u1,
-        exp: u11 = FILL,
-        sign: u1,
+        quiet: bool,
+        exp: u11,
+        sign: bool,
     },
 
+    /// For initializing and reading fixnums.
     fixnum: packed struct {
         code: u51,
         negative: bool,
         _: u11 = FILL,
-        is_fixnum: bool = true,
+        _is_fixnum: bool = true,
     },
 
+    /// Inspection through the lens of the ptr category.
     ptr: packed struct {
-        // if foreign, we don't actually use value and is_weak
-        value: u49,
-        weak: bool = false,
-        foreign: bool = false,
-        is_ptr: bool = true,
-        _: u11 = FILL,
-        _fixnum: bool = false,
+        _value: u48,
+        is_weak: bool,
+        _unused: bool,
+        is_foreign: bool,
+        _is_ptr: bool,
+        _: u11,
+        _is_fixnum: bool,
     },
 
+    /// For initializing and reading foreign pointers.
     fptr: packed struct {
         value: u50,
-        _foreign: bool = true,
-        _ptr: bool = true,
+        _is_foreign: bool = true,
+        _is_ptr: bool = true,
         _: u11 = FILL,
-        _fixnum: bool = false,
+        _is_fixnum: bool = false,
     },
 
+    /// For initializing and reading Zisp heap pointers.
+    zptr: packed struct {
+        tagged_value: u48,
+        is_weak: bool = false,
+        _unused: bool = false,
+        _is_foreign: bool = false,
+        _is_ptr: bool = true,
+        _: u11 = FILL,
+        _is_fixnum: bool = false,
+    },
+
+    /// Inspection as an other (non-fixnum, non-pointer) packed value.
+    other: packed struct {
+        _value: u48,
+        tag: OtherTag,
+        _is_ptr: bool,
+        _: u11,
+        _is_ifxnum: bool,
+    },
+
+    /// For initializing and reading short strings.
     sstr: packed struct {
-        // packed struct cannot contain array
-        value: u48,
-        tag: Tag = .sstr,
-        ptr: bool = false,
+        // actually [6]u8 but packed struct cannot contain arrays
+        string: u48,
+        _tag: OtherTag = .sstr,
+        _is_ptr: bool = false,
         _: u11 = FILL,
-        fixnum: bool = false,
+        _is_fixnum: bool = false,
     },
 
+    /// For initializing and reading characters.
     char: packed struct {
-        value: u48,
-        tag: Tag = .char,
-        ptr: bool = false,
+        char: u21,
+        _reserved: u27 = 0,
+        _tag: OtherTag = .char,
+        _is_ptr: bool = false,
         _: u11 = FILL,
-        fixnum: bool = false,
+        _is_fixnum: bool = false,
     },
 
+    /// For initializing and reading misc values aka singletons.
     misc: packed struct {
-        value: u48,
-        tag: Tag = .misc,
-        ptr: bool = false,
+        value: u8,
+        _reserved: u40 = 0,
+        _tag: OtherTag = .misc,
+        _is_ptr: bool = false,
         _: u11 = FILL,
-        fixnum: bool = false,
+        _is_fixnum: bool = false,
     },
 
-    const Tag = enum(u3) { sstr = 1, char = 2, misc = 3 };
+    const OtherTag = enum(u3) { sstr = 1, char = 2, misc = 3 };
 
     const Self = @This();
 
@@ -216,8 +253,36 @@ pub const Value = packed union {
         std.debug.dumpHex(std.mem.asBytes(&self));
     }
 
-    /// Checks for a Zisp value (non-double) packed into a NaN.
+    // The following aren't type predicates per se, but rather determine which
+    // general category the value is in.  The exceptions are fixnum and double,
+    // since those aren't sub-categorized into further types.
+
+    /// Checks for a Zisp double, including: +nan.0, -nan.0, +inf.0, -inf.0
+    pub fn isDouble(self: Self) bool {
+        return self.ieee.exp != FILL or self.ieee.rest == 0;
+    }
+
+    /// Checks for a non-double Zisp value packed into a NaN.
     pub fn isPacked(self: Self) bool {
-        return self.nan.exp == FILL and self.nan.rest != 0;
+        return !self.isDouble();
+    }
+
+    /// Checks for a fixnum.
+    pub fn isFixnum(self: Self) bool {
+        return self.isPacked() and self.ieee.sign;
+    }
+
+    /// Checks for any kind of pointer.
+    pub fn isPtr(self: Self) bool {
+        return self.isPacked() and !self.ieee.sign and self.ieee.quiet;
+    }
+
+    /// Checks for a non-double, non-fixnum, non-pointer Zisp value.
+    fn _isOther(self: Self) bool {
+        return self.isPacked() and !self.ieee.sign and !self.ieee.quiet;
+    }
+
+    pub fn isOther(self: Self, tag: OtherTag) bool {
+        return self._isOther() and self.other.tag == tag;
     }
 };

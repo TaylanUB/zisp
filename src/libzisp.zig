@@ -6,6 +6,11 @@ const builtin = @import("builtin");
 const testing = std.testing;
 
 pub const value = @import("libzisp/value.zig");
+pub const read = @import("libzisp/read.zig");
+pub const gc = @import("libzisp/gc.zig");
+
+pub const Value = value.Value;
+pub const Bucket = gc.Bucket;
 
 test "double" {
     const d1: f64 = 0.123456789;
@@ -18,6 +23,7 @@ test "double" {
     try std.testing.expect(value.double.check(v1));
     try std.testing.expect(value.double.check(v2));
     try std.testing.expect(value.double.check(v3));
+
     try std.testing.expectEqual(d1 + d2, result);
 }
 
@@ -32,27 +38,54 @@ test "fixnum" {
     try std.testing.expect(value.fixnum.check(v1));
     try std.testing.expect(value.fixnum.check(v2));
     try std.testing.expect(value.fixnum.check(v3));
+
     try std.testing.expectEqual(int1 + int2, result);
 }
 
 test "ptr" {
-    const p: *anyopaque = @ptrFromInt(256);
+    const ptr = value.ptr;
 
-    const p1 = value.ptr.pack(p, value.ptr.Tag.string);
-    try std.testing.expect(value.ptr.check(p1));
-    try std.testing.expect(value.ptr.checkZisp(p1));
-    try std.testing.expect(value.ptr.checkNormal(p1));
-    const p1v, const p1t = value.ptr.unpack(p1);
-    try std.testing.expectEqual(p, p1v);
-    try std.testing.expectEqual(value.ptr.Tag.string, p1t);
+    const val: [*]Bucket = @ptrFromInt(256);
+    const tag = ptr.Tag.string;
 
-    const p2 = value.ptr.makeWeak(p1);
-    try std.testing.expect(value.ptr.check(p2));
-    try std.testing.expect(value.ptr.checkZisp(p2));
-    try std.testing.expect(value.ptr.checkWeak(p2));
-    const p2v, const p2t = value.ptr.unpack(p1);
-    try std.testing.expectEqual(p, p2v);
-    try std.testing.expectEqual(value.ptr.Tag.string, p2t);
+    const f = ptr.packForeign(val);
+    try std.testing.expect(ptr.checkForeign(f));
+    try std.testing.expectEqual(
+        @intFromPtr(val),
+        @intFromPtr(ptr.unpackForeign(f)),
+    );
+
+    const p = ptr.pack(val, tag);
+    try std.testing.expect(ptr.check(p));
+    try std.testing.expect(ptr.checkZisp(p, tag));
+    try std.testing.expect(ptr.checkStrong(p));
+
+    const pv, const pt = ptr.unpack(p);
+    try std.testing.expectEqual(val, pv);
+    try std.testing.expectEqual(tag, pt);
+
+    var w = ptr.makeWeak(p);
+    try std.testing.expect(ptr.check(w));
+    try std.testing.expect(ptr.checkZisp(w, tag));
+    try std.testing.expect(ptr.checkWeak(w));
+    try std.testing.expectEqual(true, value.boole.unpack(ptr.predWeak(w)));
+    try std.testing.expectEqual(false, value.boole.unpack(ptr.predWeakNull(w)));
+
+    const wv, const wt = ptr.unpack(w);
+    try std.testing.expectEqual(val, wv);
+    try std.testing.expectEqual(tag, wt);
+
+    const wv2, const wt2 = ptr.unpack(ptr.getWeak(w));
+    try std.testing.expectEqual(val, wv2);
+    try std.testing.expectEqual(tag, wt2);
+
+    ptr.setWeakNull(&w);
+    try std.testing.expect(ptr.check(w));
+    try std.testing.expect(ptr.checkWeak(w));
+    try std.testing.expect(ptr.isWeakNull(w));
+    try std.testing.expectEqual(true, value.boole.unpack(ptr.predWeak(w)));
+    try std.testing.expectEqual(true, value.boole.unpack(ptr.predWeakNull(w)));
+    try std.testing.expectEqual(false, value.boole.unpack(ptr.getWeak(w)));
 }
 
 test "sstr" {
@@ -93,6 +126,8 @@ test "sstr" {
         var secs: f64 = undefined;
 
         const iters = 1;
+        // const iters = 10_000_000; // standard
+        // const iters = 1_000_000_000; // ReleaseFast
         if (iters > 1) {
             for (0..iters) |_i| {
                 _ = _i;
@@ -149,4 +184,36 @@ test "misc" {
     const eof = value.eof.get();
     try std.testing.expect(value.eof.check(eof));
     try std.testing.expect(value.boole.unpack(value.eof.pred(eof)));
+}
+
+test "pair" {
+    const v1 = value.fixnum.pack(1);
+    const v2 = value.fixnum.pack(2);
+
+    const v3 = value.fixnum.pack(3);
+    const v4 = value.fixnum.pack(4);
+
+    const p = value.pair.cons(v1, v2);
+    try std.testing.expect(value.pair.check(p));
+    try std.testing.expect(value.boole.unpack(value.pair.pred(p)));
+
+    const car = value.pair.car(p);
+    const cdr = value.pair.cdr(p);
+    try std.testing.expectEqual(1, value.fixnum.unpack(car));
+    try std.testing.expectEqual(2, value.fixnum.unpack(cdr));
+
+    value.pair.setcar(p, v3);
+    value.pair.setcdr(p, v4);
+
+    const car2 = value.pair.car(p);
+    const cdr2 = value.pair.cdr(p);
+    try std.testing.expectEqual(3, value.fixnum.unpack(car2));
+    try std.testing.expectEqual(4, value.fixnum.unpack(cdr2));
+}
+
+test "read" {
+    const val = read.read("\"foo\"");
+    const s, const l = value.sstr.unpack(value.pair.car(value.pair.cdr(val)));
+    try std.testing.expectEqualStrings("foo", s[0..l]);
+    try std.testing.expectEqual(3, l);
 }

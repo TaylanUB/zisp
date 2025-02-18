@@ -1,7 +1,8 @@
-const Value = @import("../value.zig").Value;
-const misc = @import("misc.zig");
+const value = @import("../value.zig");
 
-pub const eof = misc.eof;
+const Value = value.Value;
+
+pub const eof = @import("misc.zig").eof;
 
 // Zig API
 
@@ -23,5 +24,5 @@ pub fn get() Value {
 }
 
 pub fn pred(v: Value) Value {
-    return if (check(v)) misc.t else misc.f;
+    return value.boole.pack(check(v));
 }

@@ -30,5 +30,5 @@ pub fn unpack(v: Value) bool {
 // Zisp API
 
 pub fn pred(v: Value) Value {
-    return if (check(v)) t else f;
+    return pack(check(v));
 }

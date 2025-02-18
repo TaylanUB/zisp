@@ -1,10 +1,11 @@
-const Value = @import("../value.zig").Value;
+const value = @import("../value.zig");
+const Value = value.Value;
 
 // Zig API
 
 /// Checks for a Zisp double (double, +inf, -inf, or canonical NaN).
 pub fn check(v: Value) bool {
-    return !v.isPacked();
+    return v.isDouble();
 }
 
 /// Asserts check().
@@ -27,7 +28,7 @@ pub fn unpack(v: Value) f64 {
 // Zisp API
 
 pub fn pred(v: Value) Value {
-    return Value.boole.pack(check(v));
+    return value.boole.pack(check(v));
 }
 
 pub fn add(v1: Value, v2: Value) Value {
