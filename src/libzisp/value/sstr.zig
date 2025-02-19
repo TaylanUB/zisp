@@ -31,7 +31,7 @@ pub fn isValidSstr(s: []const u8) bool {
 
 fn assertValidSstr(s: []const u8) void {
     if (!isValidSstr(s)) {
-        std.debug.print("invalid sstr: {s}", .{s});
+        std.debug.print("invalid sstr: {s}\n", .{s});
         @panic("invalid sstr");
     }
 }
@@ -39,6 +39,8 @@ fn assertValidSstr(s: []const u8) void {
 // Different ways of doing the following have been tested, including manual
 // shifting and bit masking, but memcpy always wins easily according to our
 // micro-benchmarks, under both ReleaseSafe and ReleaseFast.
+
+// Note: rune.zig uses equivalent code; probably good to keep in sync.
 
 pub fn pack(s: []const u8) Value {
     assertValidSstr(s);
@@ -49,6 +51,7 @@ pub fn pack(s: []const u8) Value {
 }
 
 pub fn unpack(v: Value) struct { [6]u8, u3 } {
+    assert(v);
     const s: [6]u8 = @bitCast(v.sstr.string);
     inline for (0..6) |i| {
         if (s[i] == 0) return .{ s, i };

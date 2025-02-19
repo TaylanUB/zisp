@@ -31,27 +31,13 @@ pub fn assertForeign(v: Value) void {
     }
 }
 
-pub fn checkForeignRange(ptr: *anyopaque) bool {
-    const int = @intFromPtr(ptr);
-    return int <= std.math.maxInt(u50);
-}
-
-fn assertForeignRange(ptr: *anyopaque) void {
-    if (!checkForeignRange(ptr)) {
-        std.debug.print("foreign pointer out of range: {}\n", .{ptr});
-        @panic("foreign pointer out of range");
-    }
-}
-
-pub fn packForeign(ptr: *anyopaque) Value {
-    assertForeignRange(ptr);
-    const int: u50 = @intCast(@intFromPtr(ptr));
+pub fn packForeign(int: u50) Value {
     return .{ .fptr = .{ .value = int } };
 }
 
-pub fn unpackForeign(v: Value) *anyopaque {
+pub fn unpackForeign(v: Value) u50 {
     assertForeign(v);
-    return @ptrFromInt(v.fptr.value);
+    return v.fptr.value;
 }
 
 // Zisp Pointers

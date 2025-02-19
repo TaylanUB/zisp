@@ -18,6 +18,7 @@ Instead of `string->symbol` we will have `string-intern` which
 basically does the same thing.  Dynamically generated strings that
 aren't passed to this function will be uninterned.
 
+
 ## But but but
 
 (Late addition because I didn't even notice this problem at first.
@@ -66,3 +67,46 @@ That prints: "base to us"
 
 I'm not married to the syntax `#"string"` and may end up using the
 simpler `|foo|` in the end.  It doesn't really matter.
+
+
+## More problems
+
+Dangit, couldn't have been so easy could it?
+
+What if you have a configuration file with these contents:
+
+    ((job-name "Clear /tmp directory")
+     (interval reboot)
+     (command "find /tmp -mindepth 1 -delete"))
+
+Now all those "string constants" will turn into lists with the string
+"quote" at its head.  Terrible.  One could write it with the explicit
+string literal syntax `#"foo"` for strings, but that's also terrible.
+
+
+## Salvageable
+
+I'm not yet done with this idea.  What if strings simply have a flag
+that says whether they are intended as a symbol or not?
+
+While reading, it would be set automatically.  Instead of `intern`,
+one would call a function like `symbol`, which would return a string
+with the flag set, after interning it if necessary; it would simply
+return the original string if it already had the flag set.
+
+Another way to look at this is that strings and symbols are sort of
+"polymorphic" and can be used interchangeably.  I don't want to get
+into JavaScript style automatic type conversions (yuck) but this may
+simply be a flag that's set on a string, which makes it a subtype of
+regular strings.
+
+Yes yes, I think that's good.  I even still have enough space left in
+the NaN-packing strategy to put a tag on "short strings" which are our
+6-byte immediate strings.
+
+
+## Reconsidering AGAIN
+
+*This got too long and off-topic so it continues here:*
+
+[Reader? Decoder? I barely know 'er!](reader.html)

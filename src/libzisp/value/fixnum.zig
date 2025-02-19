@@ -28,11 +28,11 @@ pub fn isValidRange(int: i64) bool {
 
 fn assertValidRange(int: i64) void {
     if (int < fixnum_min) {
-        std.debug.print("int too small for fixnum: {}", .{int});
+        std.debug.print("int too small for fixnum: {}\n", .{int});
         @panic("int too small for fixnum");
     }
     if (int > fixnum_max) {
-        std.debug.print("int too large for fixnum: {}", .{int});
+        std.debug.print("int too large for fixnum: {}\n", .{int});
         @panic("int too large for fixnum");
     }
 }

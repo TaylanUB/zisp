@@ -48,13 +48,6 @@ test "ptr" {
     const val: [*]Bucket = @ptrFromInt(256);
     const tag = ptr.Tag.string;
 
-    const f = ptr.packForeign(val);
-    try std.testing.expect(ptr.checkForeign(f));
-    try std.testing.expectEqual(
-        @intFromPtr(val),
-        @intFromPtr(ptr.unpackForeign(f)),
-    );
-
     const p = ptr.pack(val, tag);
     try std.testing.expect(ptr.check(p));
     try std.testing.expect(ptr.checkZisp(p, tag));
@@ -88,8 +81,35 @@ test "ptr" {
     try std.testing.expectEqual(false, value.boole.unpack(ptr.getWeak(w)));
 }
 
+test "fptr" {
+    const ptr = value.ptr;
+
+    const int1: u50 = 0;
+    const int2: u50 = std.math.maxInt(u50);
+
+    const f1 = ptr.packForeign(int1);
+    try std.testing.expect(ptr.checkForeign(f1));
+    try std.testing.expectEqual(int1, ptr.unpackForeign(f1));
+
+    const f2 = ptr.packForeign(int2);
+    try std.testing.expect(ptr.checkForeign(f2));
+    try std.testing.expectEqual(int2, ptr.unpackForeign(f2));
+}
+
+test "rune" {
+    const r1 = value.rune.pack("test");
+    try std.testing.expect(value.rune.check(r1));
+
+    const s1, const l1 = value.rune.unpack(r1);
+    try std.testing.expectEqualStrings("test", s1[0..l1]);
+}
+
+const SstrImpl = struct { SstrPack, SstrUnpack };
+const SstrPack = *const fn ([]const u8) Value;
+const SstrUnpack = *const fn (Value) struct { [6]u8, u3 };
+
 test "sstr" {
-    const impls = .{
+    const impls = [_]SstrImpl{
         .{ value.sstr.pack, value.sstr.unpack },
         // .{ value.sstr.pack1, value.sstr.unpack1 },
         // .{ value.sstr.pack2, value.sstr.unpack2 },
@@ -97,63 +117,82 @@ test "sstr" {
         // .{ value.sstr.pack4, value.sstr.unpack4 },
     };
 
-    inline for (impls, 0..) |impl, i| {
-        const pack, const unpack = impl;
+    for (impls) |impl| {
+        try testSstr(impl);
+    }
 
-        const ss1 = pack("1");
-        const ss2 = pack("123");
-        const ss3 = pack("123456");
-
-        const s1, const l1 = unpack(ss1);
-        const s2, const l2 = unpack(ss2);
-        const s3, const l3 = unpack(ss3);
-
-        try std.testing.expect(value.sstr.check(ss1));
-        try std.testing.expect(value.sstr.check(ss2));
-        try std.testing.expect(value.sstr.check(ss3));
-
-        try std.testing.expectEqual(1, l1);
-        try std.testing.expectEqualStrings("1", s1[0..l1]);
-
-        try std.testing.expectEqual(3, l2);
-        try std.testing.expectEqualStrings("123", s2[0..l2]);
-
-        try std.testing.expectEqual(6, l3);
-        try std.testing.expectEqualStrings("123456", s3[0..l3]);
-
-        var timer = try std.time.Timer.start();
-        var ns: f64 = undefined;
-        var secs: f64 = undefined;
-
-        const iters = 1;
-        // const iters = 10_000_000; // standard
-        // const iters = 1_000_000_000; // ReleaseFast
-        if (iters > 1) {
-            for (0..iters) |_i| {
-                _ = _i;
-                std.mem.doNotOptimizeAway(pack("1"));
-                std.mem.doNotOptimizeAway(pack("123"));
-                std.mem.doNotOptimizeAway(pack("123456"));
-            }
-
-            ns = @floatFromInt(timer.lap());
-            secs = ns / 1_000_000_000;
-
-            std.debug.print("pack{}: {d:.3}s\t", .{ i, secs });
-
-            for (0..iters) |_i| {
-                _ = _i;
-                std.mem.doNotOptimizeAway(unpack(ss1));
-                std.mem.doNotOptimizeAway(unpack(ss2));
-                std.mem.doNotOptimizeAway(unpack(ss3));
-            }
-
-            ns = @floatFromInt(timer.lap());
-            secs = ns / 1_000_000_000;
-
-            std.debug.print("unpack{}: {d:.3}s\n", .{ i, secs });
+    if (impls.len > 1) {
+        const iters = switch (@import("builtin").mode) {
+            .Debug, .ReleaseSmall => 10_000_000,
+            .ReleaseSafe => 100_000_000,
+            .ReleaseFast => 1_000_000_000,
+        };
+        std.debug.print("Benchmarking with {} iters.\n", .{iters});
+        inline for (impls, 0..) |impl, i| {
+            try benchmarkSstr(impl, i, iters);
         }
     }
+}
+
+fn testSstr(impl: SstrImpl) !void {
+    const pack, const unpack = impl;
+
+    const ss1 = pack("1");
+    const ss2 = pack("123");
+    const ss3 = pack("123456");
+
+    const s1, const l1 = unpack(ss1);
+    const s2, const l2 = unpack(ss2);
+    const s3, const l3 = unpack(ss3);
+
+    try std.testing.expect(value.sstr.check(ss1));
+    try std.testing.expect(value.sstr.check(ss2));
+    try std.testing.expect(value.sstr.check(ss3));
+
+    try std.testing.expectEqual(1, l1);
+    try std.testing.expectEqualStrings("1", s1[0..l1]);
+
+    try std.testing.expectEqual(3, l2);
+    try std.testing.expectEqualStrings("123", s2[0..l2]);
+
+    try std.testing.expectEqual(6, l3);
+    try std.testing.expectEqualStrings("123456", s3[0..l3]);
+}
+
+fn benchmarkSstr(impl: SstrImpl, id: usize, iters: usize) !void {
+    const pack, const unpack = impl;
+
+    var timer = try std.time.Timer.start();
+    var ns: f64 = undefined;
+    var secs: f64 = undefined;
+
+    var ss1: Value = undefined;
+    var ss2: Value = undefined;
+    var ss3: Value = undefined;
+
+    for (0..iters) |_i| {
+        _ = _i;
+        ss1 = pack("1");
+        ss2 = pack("123");
+        ss3 = pack("123456");
+    }
+
+    ns = @floatFromInt(timer.lap());
+    secs = ns / 1_000_000_000;
+
+    std.debug.print("pack{}: {d:.3}s\t", .{ id, secs });
+
+    for (0..iters) |_i| {
+        _ = _i;
+        std.mem.doNotOptimizeAway(unpack(ss1));
+        std.mem.doNotOptimizeAway(unpack(ss2));
+        std.mem.doNotOptimizeAway(unpack(ss3));
+    }
+
+    ns = @floatFromInt(timer.lap());
+    secs = ns / 1_000_000_000;
+
+    std.debug.print("unpack{}: {d:.3}s\n", .{ id, secs });
 }
 
 test "char" {
@@ -213,7 +252,23 @@ test "pair" {
 
 test "read" {
     const val = read.read("\"foo\"");
-    const s, const l = value.sstr.unpack(value.pair.car(value.pair.cdr(val)));
-    try std.testing.expectEqualStrings("foo", s[0..l]);
-    try std.testing.expectEqual(3, l);
+    const r, const rl = value.rune.unpack(value.pair.car(val));
+    const s, const sl = value.sstr.unpack(value.pair.cdr(val));
+    try std.testing.expectEqualStrings("string", r[0..rl]);
+    try std.testing.expectEqualStrings("foo", s[0..sl]);
+}
+
+test "read2" {
+    const val = read.read("#\"foo\"");
+
+    const r, const rl = value.rune.unpack(value.pair.car(val));
+    try std.testing.expectEqualStrings("hash", r[0..rl]);
+
+    const cdr = value.pair.cdr(val);
+
+    const s, const sl = value.rune.unpack(value.pair.car(cdr));
+    try std.testing.expectEqualStrings("string", s[0..sl]);
+
+    const f, const fl = value.sstr.unpack(value.pair.cdr(cdr));
+    try std.testing.expectEqualStrings("foo", f[0..fl]);
 }

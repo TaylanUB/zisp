@@ -65,9 +65,9 @@
 //
 //   001   :: Weak pointer to Zisp heap object
 //
-//   01.   :: Undefined
+//   01.   :: Undefined (may be used by GC to flag pointers for some reason?)
 //
-//   1..   :: Undefined
+//   1..   :: Foreign pointer (basically, a 50-bit fixnum of another type)
 //
 // This means pointers to the Zisp heap are 48 bits.  Of those, we only really
 // need 45, since 64-bit platforms are in practice limited to 48-bit addresses,
@@ -79,12 +79,15 @@
 // regular Zisp heap pointer can never be null.  Weak pointers, which can be
 // null, avoid stepping on that forbidden value thanks to bit 49 being set.
 //
+// Foreign pointers allow storing arbitrary pointers, or integers basically, of
+// up to 50 bits, without any further definition in Zisp of what they mean.
+//
 //
 // === Other values ===
 //
-// This 51-bit range is divided as follows, based on the initial bits:
+// This 51-bit range is divided as follows, based on the high bits:
 //
-//   000   :: Undefined
+//   000   :: Runes
 //
 //   001   :: Short string
 //
@@ -94,9 +97,12 @@
 //
 //   1..   :: Undefined
 //
-// Zisp strings are immutable and always encoded in UTF-8.  Any string fitting
-// into 6 bytes or less will be stored as an immediate value, not requiring any
-// heap allocation or interning.  (It's implicitly interned.)
+// Runes are symbols of 1 to 6 ASCII letters, used to implement reader syntax;
+// both built-in and extensions.
+//
+// Zisp strings are immutable.  Any string fitting into 6 bytes or less will be
+// stored as an immediate value, not requiring any heap allocation or interning.
+// It's implicitly interned, so to speak.  This includes the empty string.
 //
 // The null byte serves as a terminator and cannot appear in these strings; a
 // string that short but actually containing a null byte will need to be heap
@@ -115,15 +121,19 @@
 // 8 bits are allowed to be set, with the other 40 being reserved, so there's a
 // limit of 256 singleton values that can be defined.
 //
-// And on top of all that we still have a 48-bit and a 50-bit range left!
+// And on top of all that we still have a 50-bit range left!
 //
-// The forbidden value 4, Positive Infinity, is in the 48-bit undefined value
-// range starting with the 000 tag.
+// The forbidden value 4, Positive Infinity, would be the "empty string rune"
+// but that isn't allowed anyway, so all is fine.
 //
 
 // Here's the original article explaining the strategy:
 //
-// https://tkammer.de/zisp/notes/nan.html
+//   https://tkammer.de/zisp/notes/nan.html
+//
+// More about runes:
+//
+//   https://tkammer.de/zisp/notes/symbols.html
 //
 // Note: Packed structs are least-to-most significant, so the order of fields
 // must be reversed relative to a typical big-endian illustration of the bit
@@ -136,6 +146,7 @@ pub const fixnum = @import("value/fixnum.zig");
 
 pub const ptr = @import("value/ptr.zig");
 
+pub const rune = @import("value/rune.zig");
 pub const sstr = @import("value/sstr.zig");
 pub const char = @import("value/char.zig");
 pub const boole = @import("value/boole.zig");
@@ -144,7 +155,7 @@ pub const eof = @import("value/eof.zig");
 
 pub const pair = @import("value/pair.zig");
 
-/// To fill up the u11 exponent part of a NaN.
+// To fill up the u11 exponent part of a NaN.
 const FILL = 0x7ff;
 
 /// Represents a Zisp value/object.
@@ -214,6 +225,16 @@ pub const Value = packed union {
         _is_ifxnum: bool,
     },
 
+    /// For initializing and reading runes.
+    rune: packed struct {
+        // actually [6]u8 but packed struct cannot contain arrays
+        name: u48,
+        _tag: OtherTag = .rune,
+        _is_ptr: bool = false,
+        _: u11 = FILL,
+        _is_fixnum: bool = false,
+    },
+
     /// For initializing and reading short strings.
     sstr: packed struct {
         // actually [6]u8 but packed struct cannot contain arrays
@@ -244,7 +265,7 @@ pub const Value = packed union {
         _is_fixnum: bool = false,
     },
 
-    const OtherTag = enum(u3) { sstr = 1, char = 2, misc = 3 };
+    const OtherTag = enum(u3) { rune, sstr, char, misc };
 
     const Self = @This();
 
@@ -282,6 +303,7 @@ pub const Value = packed union {
         return self.isPacked() and !self.ieee.sign and !self.ieee.quiet;
     }
 
+    /// Checks for any "other" type of value.
     pub fn isOther(self: Self, tag: OtherTag) bool {
         return self._isOther() and self.other.tag == tag;
     }

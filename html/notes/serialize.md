@@ -1,7 +1,6 @@
 # Everything can be serialized
 
-Let's look at the code mentioned in [compilation](compilation.html)
-again:
+Let's look at the code mentioned in [compilation](compile.html) again:
 
 ```scheme
 
