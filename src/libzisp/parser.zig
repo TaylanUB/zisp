@@ -55,12 +55,14 @@
 // A separate process called "decoding" can transform simple data structures,
 // consisting of only the above types, into a richer set of Zisp data types.
 //
-// For example, the decoder may turn (#hash ...) into a vector.  Some runes may
-// be decoded in isolation rather than as part of a list, which is how #true and #false are implemented.
+// For example, the decoder may turn (#hash ...) into a vector, as one would
+// expect a vector literal like #(...) to work in Scheme.
 //
-//It also
-// interprets common rune invocations like (#quote ...) to implement the
-// traditional quoting mechanism, but in a better way:
+// Runes may be decoded in isolation as well, rather than transforming a list
+// whose head they appear in.  This is how #true and #false are implemented.
+//
+// The decoder interprets (#quote ...) to implement the traditional quoting
+// mechanism, but in a better way:
 //
 // Traditional quote is "unhygienic" in Scheme terms.  An expressoin such as
 // '(foo bar) will always be read as (quote (foo bar)) regardless of what sort
