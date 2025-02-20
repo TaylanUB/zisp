@@ -272,5 +272,5 @@ test "parse2" {
     const f, const fl = value.sstr.unpack(value.pair.cdr(cdr));
     try std.testing.expectEqualStrings("foo", f[0..fl]);
 
-    _ = parser.parse("(\"foo\" '\"bar\" [#x \"baz\"])");
+    _ = parser.parse("(foo \"bar\" [#x #\"baz\"] 'bat)");
 }

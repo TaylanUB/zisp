@@ -30,15 +30,15 @@
 //
 //   [...]    -> (#square ...)
 //
-//   'foo     -> (#quote . foo)
+//   'foo     -> (#apos . foo)
 //
 // These can combine:
 //
 //   #{...}   -> (#hash #brace ...)
 //
-//   #'foo    -> (#hash #quote . foo)
+//   #'foo    -> (#hash #apos . foo)
 //
-//   ##'[...] -> (#hash #hash #quote #square ...)
+//   ##'[...] -> (#hash #hash #apos #square ...)
 //
 // As a specialty, double-quoted strings are actually considered sugar by the
 // code parser, and are transformed as follows into data:
@@ -61,7 +61,7 @@
 // Runes may be decoded in isolation as well, rather than transforming a list
 // whose head they appear in.  This is how #true and #false are implemented.
 //
-// The decoder interprets (#quote ...) to implement the traditional quoting
+// The decoder interprets (#apos ...) to implement the traditional quoting
 // mechanism, but in a better way:
 //
 // Traditional quote is "unhygienic" in Scheme terms.  An expressoin such as
@@ -70,8 +70,8 @@
 // the identifier "quote" is bound to in that lexical context.
 //
 // The Zisp decoder, which transforms not text to text, but objects to objects,
-// can turn (#quote ...) into an abstract object which encapsulates the notion
-// of quoting, which the Zisp evaluator can recognize and act upon.
+// can turn (#apos ...) into an abstract object which encapsulates the notion of
+// quoting, which the Zisp evaluator can recognize and act upon.
 //
 // One way to think about this, in Scheme (R6RS / syntax-case) terms, is that
 // expressions like '(foo bar) turn directly into a *syntax object* when read,
@@ -180,31 +180,6 @@ const State = struct {
     fn isWhitespace(self: *State) bool {
         return switch (self.peek()) {
             '\t', '\n', ' ' => true,
-            else => false,
-        };
-    }
-
-    // Checks for: Whitespace, closing brackets, and EOF.
-    //
-    // This can tell us that we're in a position such as:
-    //
-    //   (foo| bar)
-    //
-    //   (foo bar|)
-    //
-    //   foo|
-    //
-    // We could also accept semicolon, so the following works, like in Scheme:
-    //
-    //   (foo;comment
-    //    bar)
-    //
-    // But IMO this should be an error.  It's too easy to misread, and might
-    // just be a typo: the semicolon may have been meant to be a colon.
-    //
-    fn isEndDelimiter(self: *State) bool {
-        return switch (self.peek()) {
-            '\t', '\n', ' ', ')', ']', '}' => true,
             else => false,
         };
     }
@@ -376,28 +351,7 @@ fn handleHash(s: *State) *State {
 }
 
 fn handleRune(s: *State) *State {
-    //
-    // We are now here, knowing that at least one ASCII letter follows:
-    //
-    //   #|foo
-    //
-
-    var buf: [6]u8 = undefined;
-    var i: u8 = 0;
-    while (!s.eof()) : (i += 1) switch (s.peek()) {
-        'a'...'z', 'A'...'Z' => {
-            if (i == buf.len) {
-                return err(s, "rune too long");
-            }
-            buf[i] = s.getc();
-        },
-        else => break,
-    };
-
-    // Note: 'i' can't be 0 since this function is only called if at least one
-    // ASCII letter is found after the hash.
-
-    const rune = value.rune.pack(buf[0..i]);
+    const rune = readRune(s) orelse return err(s, "rune too long");
 
     //
     // Now we're at the end of the rune, but it could be a rune-datum:
@@ -405,7 +359,11 @@ fn handleRune(s: *State) *State {
     //   #foo|(...)
     //
 
-    if (s.isEndDelimiter()) {
+    if (s.eof() or switch (s.peek()) {
+        '\t', '\n', ' ', ')', ']', '}' => true,
+        else => false,
+    }) {
+        // Nope, just a stand-alone rune.
         return s.setReturn(rune);
     }
 
@@ -419,6 +377,26 @@ fn handleRune(s: *State) *State {
     s.datum_rune = rune;
     s.next = .end_rune_datum;
     return s.newSubstate(.start_datum);
+}
+
+fn readRune(s: *State) ?Value {
+    var buf: [6]u8 = undefined;
+    var i: u8 = 0;
+    while (!s.eof()) : (i += 1) switch (s.peek()) {
+        'a'...'z', 'A'...'Z' => {
+            if (i == buf.len) {
+                return null;
+            }
+            buf[i] = s.getc();
+        },
+        else => break,
+    };
+
+    // 'i' can't be 0 since this function is only called if at least one ASCII
+    // letter was seen after the hash.
+    std.debug.assert(i != 0);
+
+    return value.rune.pack(buf[0..i]);
 }
 
 fn endRuneDatum(s: *State) *State {
@@ -482,8 +460,47 @@ fn readQuotedSstr(s: *State) error{UnclosedString}!?Value {
 }
 
 fn readQuotedLongString(s: *State) Value {
-    _ = s;
-    @panic("not implemented");
+    return err(s, "NOT YET IMPLEMENTED");
+}
+
+fn startBareString(s: *State) *State {
+    return readBareSstr(s) orelse readBareLongString(s);
+}
+
+fn readBareSstr(s: *State) ?*State {
+    // We will reset to this position if we fail.
+    const start_pos = s.pos;
+
+    var buf: [6]u8 = undefined;
+    var i: u8 = 0;
+    while (!s.eof()) : (i += 1) {
+        if (isBareStringEnd(s)) {
+            break;
+        }
+        if (i == buf.len) {
+            // failed; reset and bail out
+            s.pos = start_pos;
+            return null;
+        }
+        buf[i] = s.getc();
+        i += 1;
+    }
+
+    return s.setReturn(value.sstr.pack(buf[0..i]));
+}
+
+fn isBareStringEnd(s: *State) bool {
+    // We will ignore illegal characters here, because they aren't consumed by
+    // this function; whatever code comes next must handle them.
+    return s.eof() or switch (s.peek()) {
+        0...31, 127...255 => true,
+        '(', ')', '[', ']', '{', '}', ';', '#', '"', '\'', '`', ',' => true,
+        else => false,
+    };
+}
+
+fn readBareLongString(s: *State) *State {
+    return err(s, "NOT YET IMPLEMENTED");
 }
 
 fn startQuote(s: *State, c: u8) *State {
@@ -645,10 +662,6 @@ fn handlePlusMinus(s: *State, c: u8) *State {
 
 fn handleDigit(s: *State, c: u8) *State {
     _ = c;
-    return s;
-}
-
-fn startBareString(s: *State) *State {
     return s;
 }
 
