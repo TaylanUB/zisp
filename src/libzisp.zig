@@ -271,4 +271,6 @@ test "read2" {
 
     const f, const fl = value.sstr.unpack(value.pair.cdr(cdr));
     try std.testing.expectEqualStrings("foo", f[0..fl]);
+
+    _ = read.read("(\"foo\" '\"bar\" [#x \"baz\"])");
 }
