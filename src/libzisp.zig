@@ -5,9 +5,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
-pub const value = @import("libzisp/value.zig");
-pub const read = @import("libzisp/read.zig");
 pub const gc = @import("libzisp/gc.zig");
+pub const parser = @import("libzisp/parser.zig");
+pub const value = @import("libzisp/value.zig");
 
 pub const Value = value.Value;
 pub const Bucket = gc.Bucket;
@@ -250,16 +250,16 @@ test "pair" {
     try std.testing.expectEqual(4, value.fixnum.unpack(cdr2));
 }
 
-test "read" {
-    const val = read.read("\"foo\"");
+test "parse" {
+    const val = parser.parse("\"foo\"");
     const r, const rl = value.rune.unpack(value.pair.car(val));
     const s, const sl = value.sstr.unpack(value.pair.cdr(val));
     try std.testing.expectEqualStrings("string", r[0..rl]);
     try std.testing.expectEqualStrings("foo", s[0..sl]);
 }
 
-test "read2" {
-    const val = read.read("#\"foo\"");
+test "parse2" {
+    const val = parser.parse("#\"foo\"");
 
     const r, const rl = value.rune.unpack(value.pair.car(val));
     try std.testing.expectEqualStrings("hash", r[0..rl]);
@@ -272,5 +272,5 @@ test "read2" {
     const f, const fl = value.sstr.unpack(value.pair.cdr(cdr));
     try std.testing.expectEqualStrings("foo", f[0..fl]);
 
-    _ = read.read("(\"foo\" '\"bar\" [#x \"baz\"])");
+    _ = parser.parse("(\"foo\" '\"bar\" [#x \"baz\"])");
 }

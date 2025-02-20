@@ -253,7 +253,7 @@ const Next = enum {
     finish,
 };
 
-pub fn read(input: []const u8) Value {
+pub fn parse(input: []const u8) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     var top = State{ .alloc = gpa.allocator(), .input = input };
     var s = &top;
@@ -268,13 +268,12 @@ pub fn read(input: []const u8) Value {
             .end_improper_list => endImproperList(s),
             .finish => s.finish() orelse break,
         };
-        std.debug.print("next: {}\n", .{s.next});
     }
     if (s.eof() or s.isFinalNull()) {
         return s.retval;
     } else {
         // Should never happen.
-        err(s, "READER BUG: unconsumed input");
+        err(s, "PARSER BUG: unconsumed input");
     }
 }
 
@@ -654,5 +653,5 @@ fn startBareString(s: *State) *State {
 fn err(s: *State, msg: []const u8) noreturn {
     std.debug.print("{s}\n", .{msg});
     std.debug.print("pos: {}\n", .{s.pos});
-    @panic("reader error");
+    @panic("parse error");
 }
