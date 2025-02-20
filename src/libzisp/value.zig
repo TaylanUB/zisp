@@ -1,9 +1,9 @@
 //
-// Here's a summary of our packing strategy.
+// === NaN Packing Strategy ===
 //
 // Format of a double, in Zig least-to-most significant field order:
 //
-//   { sign: u1, exponent: u11, fraction: u52 }
+//   { fraction: u52, exponent: u11, sign: u1 }
 //
 // When the exponent bits are all set, it's either a NaN or an Infinity.
 //
@@ -23,7 +23,7 @@
 // The abbreviation "cqNaN" stands for canonical quiet NaN.
 //
 // Note that 2^51 means the MSb of the 52 fraction bits being set, and the rest
-// being zero.  Th fraction MSb is also called the is_quiet flag, because it
+// being zero.  The fraction MSb is also called the is_quiet flag, because it
 // demarcates quiet NaNs.  The rest being zero makes it the canonical qNaN.
 //
 // The positive and negative cqNaN are the *only* NaN values that can actually
@@ -72,8 +72,8 @@
 // This means pointers to the Zisp heap are 48 bits.  Of those, we only really
 // need 45, since 64-bit platforms are in practice limited to 48-bit addresses,
 // and allocations happen at 8-byte boundaries, meaning the least significant 3
-// bit are always 0.  Thus, we are able to store yet another 3-bit tag in those
-// 48-bit pointers alongside the actual, multiple-of-8, 48-bit address.
+// bits are always unset.  Thus, we are able to store yet another 3-bit tag in
+// those 48-bit pointers alongside the actual, multiple-of-8, 48-bit address.
 //
 // The forbidden value 3, Positive cqNaN, is avoided thanks to the fact that a
 // regular Zisp heap pointer can never be null.  Weak pointers, which can be
@@ -110,7 +110,7 @@
 //
 // There may also be uninterned strings on the heap that are also as short but
 // ended up on the heap due to being uninterned.  Calling intern on them will
-// return the equivalent short string.
+// return the equivalent short string as an immediate.
 //
 // Unicode code points need a maximum of 21 bits, yet we have 48 available.
 // This may be exploited for a future extension.
