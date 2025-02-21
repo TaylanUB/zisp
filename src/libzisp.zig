@@ -254,7 +254,7 @@ test "parse" {
     const val = parser.parse("\"foo\"");
     const r, const rl = value.rune.unpack(value.pair.car(val));
     const s, const sl = value.sstr.unpack(value.pair.cdr(val));
-    try std.testing.expectEqualStrings("string", r[0..rl]);
+    try std.testing.expectEqualStrings("QUOTE", r[0..rl]);
     try std.testing.expectEqualStrings("foo", s[0..sl]);
 }
 
@@ -262,12 +262,12 @@ test "parse2" {
     const val = parser.parse("#\"foo\"");
 
     const r, const rl = value.rune.unpack(value.pair.car(val));
-    try std.testing.expectEqualStrings("hash", r[0..rl]);
+    try std.testing.expectEqualStrings("HASH", r[0..rl]);
 
     const cdr = value.pair.cdr(val);
 
     const s, const sl = value.rune.unpack(value.pair.car(cdr));
-    try std.testing.expectEqualStrings("string", s[0..sl]);
+    try std.testing.expectEqualStrings("QUOTE", s[0..sl]);
 
     const f, const fl = value.sstr.unpack(value.pair.cdr(cdr));
     try std.testing.expectEqualStrings("foo", f[0..fl]);

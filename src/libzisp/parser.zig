@@ -26,28 +26,31 @@
 // When the code parser encounters syntax sugar, it always transforms it into a
 // list starting with a rune, like in the following examples:
 //
-//   #(...)   -> (#hash ...)
+//   #(...)   -> (#HASH ...)
 //
-//   [...]    -> (#square ...)
+//   [...]    -> (#SQUARE ...)
 //
-//   'foo     -> (#apos . foo)
+//   'foo     -> (#QUOTE . foo)
 //
 // These can combine:
 //
-//   #{...}   -> (#hash #brace ...)
+//   #{...}   -> (#HASH #BRACE ...)
 //
-//   #'foo    -> (#hash #apos . foo)
+//   #'foo    -> (#HASH #QUOTE . foo)
 //
-//   ##'[...] -> (#hash #hash #apos #square ...)
+//   ##'[...] -> (#HASH #HASH #QUOTE #SQUARE ...)
 //
 // As a specialty, double-quoted strings are actually considered sugar by the
 // code parser, and are transformed as follows into data:
 //
-//   "..."    -> (#string "...")
+//   "..."    -> (#QUOTE "...")
 //
 // (Otherwise, all string literals would be identifiers, or all identifiers
 // would be string literals, because Zisp doesn't differentiate strings and
 // symbols like traditional lisps.)
+//
+// Runes are case-sensitive, and the code parser emits runes using only capital
+// letters so as to leave lowercase runes free for user extensions.
 //
 //
 // === Decoder ===
@@ -55,23 +58,23 @@
 // A separate process called "decoding" can transform simple data structures,
 // consisting of only the above types, into a richer set of Zisp data types.
 //
-// For example, the decoder may turn (#hash ...) into a vector, as one would
+// For example, the decoder may turn (#HASH ...) into a vector, as one would
 // expect a vector literal like #(...) to work in Scheme.
 //
 // Runes may be decoded in isolation as well, rather than transforming a list
 // whose head they appear in.  This is how #true and #false are implemented.
 //
-// The decoder interprets (#apos ...) to implement the traditional quoting
+// The decoder interprets (#QUOTE ...) to implement the traditional quoting
 // mechanism, but in a better way:
 //
-// Traditional quote is "unhygienic" in Scheme terms.  An expressoin such as
+// Traditional quote is "unhygienic" in Scheme terms.  An expression such as
 // '(foo bar) will always be read as (quote (foo bar)) regardless of what sort
 // of lexical context it appears in, so the semantics will depend on whatever
 // the identifier "quote" is bound to in that lexical context.
 //
 // The Zisp decoder, which transforms not text to text, but objects to objects,
-// can turn (#apos ...) into an abstract object which encapsulates the notion of
-// quoting, which the Zisp evaluator can recognize and act upon.
+// can turn (#QUOTE ...) into an abstract object which encapsulates the notion
+// of quoting, which the Zisp evaluator can recognize and act upon.
 //
 // One way to think about this, in Scheme (R6RS / syntax-case) terms, is that
 // expressions like '(foo bar) turn directly into a *syntax object* when read,
@@ -131,9 +134,9 @@ const State = struct {
     parent: ?*State = null,
 
     datum_rune: Value = value.boole.f,
-    list_tail: Value = value.nil.nil,
+    list_stack: Value = value.nil.nil,
     opening_bracket: enum { paren, square, brace } = .paren,
-    opening_quote: enum { apos, tick, comma } = .apos,
+    opening_quote: enum { quote, grave, comma } = .quote,
 
     retval: Value = value.eof.eof,
 
@@ -408,7 +411,7 @@ fn endRuneDatum(s: *State) *State {
 
 fn endHashDatum(s: *State) *State {
     return s.setReturn(value.pair.cons(
-        value.rune.pack("hash"),
+        value.rune.pack("HASH"),
         s.retval,
     ));
 }
@@ -420,8 +423,8 @@ fn startQuotedString(s: *State) *State {
     //
     const str = readQuotedString(s) catch return err(s, "unclosed string");
     if (s.mode == .code) {
-        // "foo bar" => (#string . "foo bar")
-        const rune = value.rune.pack("string");
+        // "foo bar" => (#QUOTE . "foo bar")
+        const rune = value.rune.pack("QUOTE");
         const pair = value.pair.cons(rune, str);
         return s.setReturn(pair);
     } else {
@@ -509,8 +512,8 @@ fn startQuote(s: *State, c: u8) *State {
         return err(s, "whitespace after apostrophe");
     }
     s.opening_quote = switch (c) {
-        '\'' => .apos,
-        '`' => .tick,
+        '\'' => .quote,
+        '`' => .grave,
         ',' => .comma,
         else => unreachable,
     };
@@ -522,9 +525,9 @@ fn startQuote(s: *State, c: u8) *State {
 
 fn endQuote(s: *State) *State {
     const name = switch (s.opening_quote) {
-        .apos => "apos",
-        .tick => "tick",
-        .comma => "comma",
+        .quote => "QUOTE",
+        .grave => "GRAVE",
+        .comma => "COMMA",
     };
     return s.setReturn(value.pair.cons(
         value.rune.pack(name),
@@ -547,14 +550,14 @@ fn startList(s: *State, open: u8) *State {
     if (open == '[' and s.peek() == ']') {
         s.skip();
         return s.setReturn(value.pair.cons(
-            value.rune.pack("square"),
+            value.rune.pack("SQUARE"),
             value.nil.nil,
         ));
     }
     if (open == '{' and s.peek() == '}') {
         s.skip();
         return s.setReturn(value.pair.cons(
-            value.rune.pack("brace"),
+            value.rune.pack("BRACE"),
             value.nil.nil,
         ));
     }
@@ -576,7 +579,7 @@ fn continueList(s: *State) *State {
         return err(s, "unexpected EOF while parsing list");
     }
 
-    const tail = value.pair.cons(s.retval, s.list_tail);
+    const stack = value.pair.cons(s.retval, s.list_stack);
 
     const open = s.opening_bracket;
     const char = s.peek();
@@ -584,24 +587,24 @@ fn continueList(s: *State) *State {
     // Check for proper ending: (foo bar baz)
     if (open == .paren and char == ')') {
         s.skip();
-        return s.setReturn(list.reverse(tail));
+        return s.setReturn(list.reverse(stack));
     }
     if (open == .square and char == ']') {
         s.skip();
         return s.setReturn(value.pair.cons(
-            value.rune.pack("square"),
-            list.reverse(tail),
+            value.rune.pack("SQUARE"),
+            list.reverse(stack),
         ));
     }
     if (open == .brace and char == '}') {
         s.skip();
         return s.setReturn(value.pair.cons(
-            value.rune.pack("brace"),
-            list.reverse(tail),
+            value.rune.pack("BRACE"),
+            list.reverse(stack),
         ));
     }
 
-    s.list_tail = tail;
+    s.list_stack = stack;
 
     // Check for improper ending: (foo bar . baz)
     if (char == '.') {
@@ -630,26 +633,19 @@ fn endImproperList(s: *State) *State {
         return err(s, "unexpected EOF");
     }
 
+    const result = list.reverseWithTail(s.list_stack, s.retval);
     const open = s.opening_bracket;
     const char = s.getc();
-
-    const body = s.list_tail;
-    const tail = s.retval;
-
     if (open == .paren and char == ')') {
-        return s.setReturn(list.reverseWithTail(body, tail));
+        return s.setReturn(result);
     }
     if (open == .square and char == ']') {
-        return s.setReturn(value.pair.cons(
-            value.rune.pack("square"),
-            list.reverseWithTail(body, tail),
-        ));
+        const rune = value.rune.pack("SQUARE");
+        return s.setReturn(value.pair.cons(rune, result));
     }
     if (open == .brace and char == '}') {
-        return s.setReturn(value.pair.cons(
-            value.rune.pack("brace"),
-            list.reverseWithTail(body, tail),
-        ));
+        const rune = value.rune.pack("BRACE");
+        return s.setReturn(value.pair.cons(rune, result));
     }
 
     return err(s, "malformed list or extra datum at end of improper list");
