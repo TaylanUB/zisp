@@ -6,5 +6,5 @@ const decoder = @import("decoder.zig");
 const Value = @import("../value.zig").Value;
 
 pub fn readCode(input: []const u8) Value {
-    return decoder.decode(parser.parse(input));
+    return decoder.decode(parser.parse(input, .code));
 }

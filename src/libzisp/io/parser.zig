@@ -9,19 +9,21 @@
 // The "sugar" used in code expressions is merely shorthand for more complex
 // data expressions, which could have been written by hand.
 //
-// Data expressions have a very simple format, and are only able to express a
-// minimal set of data types:
+// Data expressions have a very simple format, and are only able to express the
+// bare minimum set of data types needed to represent more complex data:
 //
-//   string -> foo , "foo bar"   ;symbols and strings are the same data type
+//   type      format             comment
+//   ----      ------             -------
 //
-//   rune   -> #foo              ;limited to 6 ASCII letters (a - z, A - Z)
+//   string    foo , "foo bar"    symbols and strings are the same data type
 //
-//   pair   -> (DATUM . DATUM)   ;the only composite data type supported
+//   rune      #name              name is 1-6 ASCII letters (a - z, A - Z)
 //
-//   nil    -> ()                ;we prefer the term nil over null
+//   pair      (DATUM . DATUM)    the only composite data type supported
 //
-// The list short-hand syntax may be considered the only "syntax sugar" that is
-// supported by the data parser:
+//   nil       ()                 we prefer the term nil over null
+//
+// The list short-hand syntax is the only "syntax sugar" supported in data:
 //
 //   (DATUM DATUM DATUM)  ->  (DATUM . (DATUM . (DATUM . ())))
 //
@@ -62,7 +64,7 @@
 //
 // You may be wondering about numbers.  As far as the parser is concerned,
 // numbers are strings.  It's the decoder (see below) that will turn bare
-// strings (those not marked with #STRING) into numbers.
+// strings (those not marked with #STRING) into numbers where appropriate.
 //
 // Note that 'foo becomes (quote foo) in Scheme, but (#QUOTE . foo) in Zisp.
 // The operand of #QUOTE is the entire cdr.  The same principle is used when
@@ -94,7 +96,7 @@
 // implemented in Zisp.
 //
 // The decoder recognizes (#QUOTE ...) to implement the traditional quoting
-// mechanism, but in a better way:
+// mechanism, but with a significant difference:
 //
 // Traditional quote is "unhygienic" in Scheme terms.  An expression such as
 // '(foo bar) will always be read as (quote (foo bar)) regardless of what sort
@@ -163,7 +165,7 @@
 // has the advantage of saving memory: If we implemented list parsing as pair
 // parsing, we would be calling the parser recursively, deeper and deeper, for
 // every pair that the list is made up of.  Although we're not limited by stack
-// space, thanks to the strategy described above, this would still waste memory
+// space (thanks to the strategy described above) this would still waste memory
 // while parsing.
 //
 //
@@ -180,31 +182,23 @@
 
 const std = @import("std");
 
-const gc = @import("../gc.zig");
-const list = @import("../list.zig");
+const lib = @import("../lib.zig");
 const value = @import("../value.zig");
 
 const Value = value.Value;
 
+pub const Mode = enum { code, data };
+
 const State = struct {
     alloc: std.mem.Allocator,
-
     input: []const u8,
     pos: usize = 0,
-
-    mode: enum { code, data } = .code,
-
+    mode: Mode = undefined,
     next: Fn = .start_parse,
-
     parent: ?*State = null,
-
-    // Used to store various context, but most notably the stack of list
-    // elements parsed so far, so just initialize it to nil.
-    context: Value = value.nil.nil,
-
-    opening_bracket: u8 = 0,
-
-    retval: Value = value.eof.eof,
+    context: Value = undefined,
+    opening_bracket: u8 = undefined,
+    retval: Value = undefined,
 
     fn eof(self: *State) bool {
         return self.pos >= self.input.len;
@@ -258,14 +252,17 @@ const State = struct {
     }
 
     fn recurParse(self: *State, start_from: Fn, return_to: Fn) *State {
-        const sub = self.alloc.create(State) catch @panic("OOM");
-        sub.* = .{ .alloc = self.alloc, .input = self.input };
-        sub.pos = self.pos;
-        sub.mode = self.mode;
-        sub.next = start_from;
-        sub.parent = self;
+        const newState = self.alloc.create(State) catch @panic("OOM");
+        newState.* = .{
+            .alloc = self.alloc,
+            .input = self.input,
+            .pos = self.pos,
+            .mode = self.mode,
+            .next = start_from,
+            .parent = self,
+        };
         self.next = return_to;
-        return sub;
+        return newState;
     }
 
     fn returnDatum(self: *State, val: Value) *State {
@@ -296,14 +293,18 @@ const Fn = enum {
     end_rune_datum,
     end_quote,
     continue_list,
-    finalize_improper_list,
+    finish_improper_list,
     end_improper_list,
     perform_return,
 };
 
-pub fn parse(input: []const u8) Value {
+pub fn parseCode(input: []const u8) Value {
+    return parse(input, .code);
+}
+
+pub fn parse(input: []const u8, mode: Mode) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    var top = State{ .alloc = gpa.allocator(), .input = input };
+    var top = State{ .alloc = gpa.allocator(), .input = input, .mode = mode };
     var s = &top;
     while (true) s = switch (s.next) {
         .start_parse => startParse(s),
@@ -312,7 +313,7 @@ pub fn parse(input: []const u8) Value {
         .end_rune_datum => endRuneDatum(s),
         .end_quote => endQuote(s),
         .continue_list => continueList(s),
-        .finalize_improper_list => finalizeImproperList(s),
+        .finish_improper_list => finishImproperList(s),
         .end_improper_list => endImproperList(s),
         .perform_return => s.performReturn() orelse return s.retval,
     };
@@ -578,6 +579,10 @@ fn endQuote(s: *State) *State {
 // List processing is, unsurprisingly, the most complicated, and it's made even
 // more complicated by the possibility of datum comments in strange places...
 
+// Make sure to use .start_parse instead of .start_datum to handle elements, so
+// that an arbitrary number of datum comments, separated by blanks (whitespace
+// and line comments) are handled automatically.
+
 fn startList(s: *State) *State {
     const open = s.getc();
 
@@ -590,6 +595,7 @@ fn startList(s: *State) *State {
         return err(s, "unexpected EOF while parsing list");
     }
 
+    s.context = value.nil.nil;
     s.opening_bracket = open;
     return if (isEndOfList(s))
         endList(s)
@@ -604,63 +610,10 @@ fn isEndOfList(s: *State) bool {
     };
 }
 
-fn continueList(s: *State) *State {
-    s.context = value.pair.cons(s.retval, s.context);
-
-    s.consumeBlanks();
-    if (s.eof()) {
-        return err(s, "unexpected EOF while parsing list");
-    }
-
-    if (isEndOfList(s)) {
-        s.context = list.reverse(s.context);
-        return endList(s);
-    }
-
-    if (s.peek() == '.') {
-        s.skip();
-        // Scheme allows (foo .(bar)) but we don't.  Mind your spaces!
-        if (!s.isWhitespace()) {
-            return err(s, "misplaced period");
-        }
-        return s.recurParse(.start_parse, .finalize_improper_list);
-    }
-
-    return s.recurParse(.start_parse, .continue_list);
-}
-
-fn finalizeImproperList(s: *State) *State {
-    s.context = list.reverseWithTail(s.context, s.retval);
-    return endImproperList(s);
-}
-
-fn endImproperList(s: *State) *State {
-    s.consumeBlanks();
-    if (s.eof()) {
-        return err(s, "unexpected EOF while parsing list");
-    }
-
-    if (isEndOfList(s)) {
-        return endList(s);
-    }
-
-    if (s.getc() == '#') {
-        if (s.eof()) {
-            return err(s, "unexpected EOF after hash while parsing list");
-        }
-        if (s.getc() == ';') {
-            return s.recurParse(.start_datum, .end_improper_list);
-        }
-    }
-
-    return err(s, "malformed list / extra datum at end of improper list");
-}
-
 fn endList(s: *State) *State {
     const open = s.opening_bracket;
     const char = s.getc();
 
-    // Check for proper ending: (foo bar baz)
     if (open == '(' and char == ')') {
         return s.returnDatum(s.context);
     }
@@ -674,6 +627,63 @@ fn endList(s: *State) *State {
     }
 
     return err(s, "wrong closing bracket for list");
+}
+
+fn continueList(s: *State) *State {
+    // Note that this accumulates list elements in reverse.
+    s.context = value.pair.cons(s.retval, s.context);
+
+    s.consumeBlanks();
+    if (s.eof()) {
+        return err(s, "unexpected EOF while parsing list");
+    }
+
+    if (isEndOfList(s)) {
+        s.context = lib.list.reverse(s.context);
+        return endList(s);
+    }
+
+    if (s.peek() == '.') {
+        s.skip();
+        // Scheme allows (foo .(bar)) but we don't.  Mind your spaces!
+        if (!s.isWhitespace()) {
+            return err(s, "misplaced period");
+        }
+        return s.recurParse(.start_parse, .finish_improper_list);
+    }
+
+    return s.recurParse(.start_parse, .continue_list);
+}
+
+fn finishImproperList(s: *State) *State {
+    s.context = lib.list.reverseWithTail(s.context, s.retval);
+    return endImproperList(s);
+}
+
+// Handling the end of an improper list is a bit awkward, because there may be
+// datum comments *after* the final cdr, where we don't actually want to parse
+// any further data.  So we keep looping here just looking for datum comments.
+
+fn endImproperList(s: *State) *State {
+    s.consumeBlanks();
+    if (s.eof()) {
+        return err(s, "unexpected EOF at end of improper list");
+    }
+
+    if (isEndOfList(s)) {
+        return endList(s);
+    }
+
+    if (s.getc() == '#') {
+        if (s.eof()) {
+            return err(s, "unexpected hash and EOF at end of improper list");
+        }
+        if (s.getc() == ';') {
+            return s.recurParse(.start_datum, .end_improper_list);
+        }
+    }
+
+    return err(s, "malformed list / extra datum at end of improper list");
 }
 
 fn err(s: *State, msg: []const u8) noreturn {

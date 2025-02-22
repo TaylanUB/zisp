@@ -1,4 +1,4 @@
-const value = @import("value.zig");
+const value = @import("../value.zig");
 
 const Value = value.Value;
 

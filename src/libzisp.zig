@@ -6,11 +6,11 @@ const builtin = @import("builtin");
 const testing = std.testing;
 
 pub const gc = @import("libzisp/gc.zig");
+pub const io = @import("libzisp/io.zig");
+pub const lib = @import("libzisp/lib.zig");
 pub const value = @import("libzisp/value.zig");
-pub const parser = @import("libzisp/io/parser.zig");
 
 pub const Value = value.Value;
-pub const Bucket = gc.Bucket;
 
 test "double" {
     const d1: f64 = 0.123456789;
@@ -45,7 +45,7 @@ test "fixnum" {
 test "ptr" {
     const ptr = value.ptr;
 
-    const val: [*]Bucket = @ptrFromInt(256);
+    const val: [*]gc.Bucket = @ptrFromInt(256);
     const tag = ptr.Tag.string;
 
     const p = ptr.pack(val, tag);
@@ -251,7 +251,7 @@ test "pair" {
 }
 
 test "parse" {
-    const val = parser.parse("\"foo\"");
+    const val = io.parser.parseCode("\"foo\"");
     const r, const rl = value.rune.unpack(value.pair.car(val));
     const s, const sl = value.sstr.unpack(value.pair.cdr(val));
     try std.testing.expectEqualStrings("STRING", r[0..rl]);
@@ -259,7 +259,7 @@ test "parse" {
 }
 
 test "parse2" {
-    const val = parser.parse(
+    const val = io.parser.parseCode(
         \\ ;; Testing some crazy datum comments
         \\ ##;"bar"#;([x #"y"]{##`,'z})"foo"
         \\ ;; end
@@ -278,7 +278,9 @@ test "parse2" {
 }
 
 test "parse3" {
-    const val = parser.parse("(foo #;x #;(x y) #;x #bar [#x #\"baz\"] 'bat)");
+    const val = io.parser.parseCode(
+        \\(foo #;x #;(x y) #;x #bar [#x #"baz"] 'bat)
+    );
 
     const car = value.pair.car;
     const cdr = value.pair.cdr;
@@ -292,7 +294,7 @@ test "parse3" {
 }
 
 test "parse4" {
-    const val = parser.parse("(foo . #;x bar #;y)");
+    const val = io.parser.parseCode("(foo . #;x bar #;y)");
 
     const s, const sl = value.sstr.unpack(value.pair.car(val));
     try std.testing.expectEqualStrings("foo", s[0..sl]);
