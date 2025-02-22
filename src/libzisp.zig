@@ -302,3 +302,10 @@ test "parse4" {
     const f, const fl = value.sstr.unpack(value.pair.cdr(val));
     try std.testing.expectEqualStrings("bar", f[0..fl]);
 }
+
+test "unparse" {
+    try std.testing.expectEqualStrings(
+        "#foo",
+        io.unparser.unparse(io.parser.parseCode("#foo")),
+    );
+}
