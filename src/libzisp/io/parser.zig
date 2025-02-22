@@ -12,15 +12,13 @@
 // Data expressions have a very simple format, and are only able to express a
 // minimal set of data types:
 //
-//   string -> foo , "foo bar"     ;symbols and strings are the same data type
+//   string -> foo , "foo bar"   ;symbols and strings are the same data type
 //
-//   number -> -1.2 , +nan.0 , ... ;this is the most complex type to represent
+//   rune   -> #foo              ;limited to 6 ASCII letters (a - z, A - Z)
 //
-//   rune   -> #foo                ;limited to 6 ASCII letters (a - z, A - Z)
+//   pair   -> (DATUM . DATUM)   ;the only composite data type supported
 //
-//   pair   -> (DATUM . DATUM)     ;the only composite data type supported
-//
-//   nil    -> ()                  ;we prefer the term nil over null
+//   nil    -> ()                ;we prefer the term nil over null
 //
 // The list short-hand syntax may be considered the only "syntax sugar" that is
 // supported by the data parser:
@@ -57,11 +55,14 @@
 // would be string literals, because Zisp doesn't differentiate strings and
 // symbols like traditional lisps.  Also, note that although we could reuse
 // #QUOTE here, instead of using #STRING, this would make it impossible to
-// differentiate between the expressions #'foo and #"foo" once parsing is
-// finished, even though we may want to give them different meanings.)
+// differentiate between the code expressions #'foo and #"foo".)
 //
 // Runes are case-sensitive, and the code parser only emits runes using
 // upper-case letters, so lower-case runes are free for user extensions.
+//
+// You may be wondering about numbers.  As far as the parser is concerned,
+// numbers are strings.  It's the decoder (see below) that will turn bare
+// strings (those not marked with #STRING) into numbers.
 //
 // Note that 'foo becomes (quote foo) in Scheme, but (#QUOTE . foo) in Zisp.
 // The operand of #QUOTE is the entire cdr.  The same principle is used when
@@ -87,21 +88,35 @@
 // Runes may be decoded in isolation as well, rather than transforming a list
 // whose head they appear in.  This is how #true and #false are implemented.
 //
+// The decoder may also perform arbitrary transforms on any type; for example,
+// it may turn bare strings (those not marked with #STRING) into numbers when
+// it's decoding data representing code.  This is how number literals are
+// implemented in Zisp.
+//
 // The decoder recognizes (#QUOTE ...) to implement the traditional quoting
 // mechanism, but in a better way:
 //
 // Traditional quote is "unhygienic" in Scheme terms.  An expression such as
 // '(foo bar) will always be read as (quote (foo bar)) regardless of what sort
 // of lexical context it appears in, so the semantics will depend on whatever
-// the identifier "quote" is bound to in that lexical context.
+// the identifier "quote" is bound to in that lexical context, meaning that the
+// expression may end up evaluating to something other than the list (foo bar).
 //
 // The Zisp decoder, which transforms not text to text, but objects to objects,
 // can turn (#QUOTE ...) into an abstract object which encapsulates the notion
-// of quoting, which the Zisp evaluator can recognize and act upon.
+// of quoting, which the Zisp evaluator can recognize and act upon, ensuring
+// that an expression like '(foo bar) always turns into the list (foo bar).
 //
 // One way to think about this, in Scheme (R6RS / syntax-case) terms, is that
 // expressions like '(foo bar) turn directly into a *syntax object* when read,
 // rather than a regular list object.
+//
+// The decoder is, of course, configurable and extensible.  The transformations
+// mentioned above would be performed only when it's told to decode data which
+// represents Zisp code.  The decoder may be given a different configuration,
+// telling it to decode, for example, data which represents a different kind of
+// domain-specific data, such as application settings, build system commands,
+// complex data records with non-standard data types, and so on.
 //
 //
 // === Implementation details ===
@@ -143,6 +158,14 @@
 // .start_datum, this means no whitespace or comments would be tolerated after
 // the datum comment.
 //
+// Note 3: When it comes to pairs/lists, we mainly try to parse them as lists,
+// and a pair becomes a special-case of an improper list (two elements).  This
+// has the advantage of saving memory: If we implemented list parsing as pair
+// parsing, we would be calling the parser recursively, deeper and deeper, for
+// every pair that the list is made up of.  Although we're not limited by stack
+// space, thanks to the strategy described above, this would still waste memory
+// while parsing.
+//
 //
 // === Notation used in comments ===
 //
@@ -157,9 +180,9 @@
 
 const std = @import("std");
 
-const gc = @import("gc.zig");
-const list = @import("list.zig");
-const value = @import("value.zig");
+const gc = @import("../gc.zig");
+const list = @import("../list.zig");
+const value = @import("../value.zig");
 
 const Value = value.Value;
 
@@ -175,10 +198,11 @@ const State = struct {
 
     parent: ?*State = null,
 
-    datum_rune: Value = value.boole.f,
-    list_stack: Value = value.nil.nil,
+    // Used to store various context, but most notably the stack of list
+    // elements parsed so far, so just initialize it to nil.
+    context: Value = value.nil.nil,
+
     opening_bracket: u8 = 0,
-    opening_quote: enum { quote, grave, comma } = .quote,
 
     retval: Value = value.eof.eof,
 
@@ -272,8 +296,8 @@ const Fn = enum {
     end_rune_datum,
     end_quote,
     continue_list,
+    finalize_improper_list,
     end_improper_list,
-    handle_trailing_datum_comments,
     perform_return,
 };
 
@@ -288,8 +312,8 @@ pub fn parse(input: []const u8) Value {
         .end_rune_datum => endRuneDatum(s),
         .end_quote => endQuote(s),
         .continue_list => continueList(s),
+        .finalize_improper_list => finalizeImproperList(s),
         .end_improper_list => endImproperList(s),
-        .handle_trailing_datum_comments => handleTrailingDatumComments(s),
         .perform_return => s.performReturn() orelse return s.retval,
     };
 }
@@ -301,7 +325,7 @@ fn startParse(s: *State) *State {
     }
     return switch (s.peek()) {
         // whitespace already consumed
-        0...31, 127...255 => err(s, "invalid character"),
+        0...32, 127...255 => err(s, "invalid character"),
         ')', ']', '}' => err(s, "unexpected closing bracket"),
         else => startDatum(s),
     };
@@ -318,7 +342,7 @@ fn startDatum(s: *State) *State {
     }
     return switch (s.peek()) {
         // whitespace checked above
-        0...31, 127...255 => err(s, "invalid character"),
+        0...32, 127...255 => err(s, "invalid character"),
 
         ')', ']', '}' => err(s, "unexpected closing bracket"),
 
@@ -332,14 +356,10 @@ fn startDatum(s: *State) *State {
 
         '(', '[', '{' => startList(s),
 
-        '+', '-' => handlePlusMinus(s),
-
-        '0'...'9' => handleDigit(s),
-
-        // Periods only allowed between digits, and to express improper lists.
-        // Things like the following look too much like it could be a typo:
+        // Periods are only allowed in the middle of a string, or to express
+        // improper lists, because the following look too much like typos:
         //
-        //   (foo .5) (foo .bar)
+        //   (foo. bar)  (foo .bar)  (123. 456)  (123 .456)
         //
         '.' => err(s, "misplaced period"),
 
@@ -368,7 +388,7 @@ fn handleHash(s: *State) *State {
 
     // Is it a rune?  #foo
     switch (s.peek()) {
-        'A'...'Z', 'a'...'z' => return handleRune(s),
+        'a'...'z', 'A'...'Z' => return handleRune(s),
         else => {},
     }
 
@@ -392,7 +412,6 @@ fn handleHash(s: *State) *State {
 
 fn handleRune(s: *State) *State {
     const rune = readRune(s) orelse return err(s, "rune too long");
-
     //
     // Now we're at the end of the rune, but it could be a rune-datum:
     //
@@ -411,7 +430,7 @@ fn handleRune(s: *State) *State {
         return err(s, "invalid use of hash in data mode");
     }
 
-    s.datum_rune = rune;
+    s.context = rune;
     return s.recurParse(.start_datum, .end_rune_datum);
 }
 
@@ -443,21 +462,16 @@ fn isEndOfRune(s: *State) bool {
 }
 
 fn endRuneDatum(s: *State) *State {
-    return s.returnDatum(value.pair.cons(
-        s.datum_rune,
-        s.retval,
-    ));
+    return s.returnDatum(value.pair.cons(s.context, s.retval));
 }
 
 fn endHashDatum(s: *State) *State {
-    return s.returnDatum(value.pair.cons(
-        value.rune.pack("HASH"),
-        s.retval,
-    ));
+    const rune = value.rune.pack("HASH");
+    return s.returnDatum(value.pair.cons(rune, s.retval));
 }
 
 fn startQuotedString(s: *State) *State {
-    // Consume opening quote.
+    // We're at |"..." so consume the opening quote before we start reading.
     s.skip();
 
     const str = readQuotedString(s) catch return err(s, "unclosed string");
@@ -507,6 +521,7 @@ fn readQuotedLongString(s: *State) Value {
 }
 
 fn startBareString(s: *State) *State {
+    // We're at |foo so start reading directly.
     return readBareSstr(s) orelse readBareLongString(s);
 }
 
@@ -546,26 +561,22 @@ fn readBareLongString(s: *State) *State {
 }
 
 fn startQuote(s: *State) *State {
-    s.opening_quote = switch (s.getc()) {
-        '\'' => .quote,
-        '`' => .grave,
-        ',' => .comma,
+    // We're at one of:  |'...  |`...  |,...
+    s.context = value.rune.pack(switch (s.getc()) {
+        '\'' => "QUOTE",
+        '`' => "GRAVE",
+        ',' => "COMMA",
         else => unreachable,
-    };
+    });
     return s.recurParse(.start_datum, .end_quote);
 }
 
 fn endQuote(s: *State) *State {
-    const name = switch (s.opening_quote) {
-        .quote => "QUOTE",
-        .grave => "GRAVE",
-        .comma => "COMMA",
-    };
-    return s.returnDatum(value.pair.cons(
-        value.rune.pack(name),
-        s.retval,
-    ));
+    return s.returnDatum(value.pair.cons(s.context, s.retval));
 }
+
+// List processing is, unsurprisingly, the most complicated, and it's made even
+// more complicated by the possibility of datum comments in strange places...
 
 fn startList(s: *State) *State {
     const open = s.getc();
@@ -575,195 +586,94 @@ fn startList(s: *State) *State {
     }
 
     s.consumeBlanks();
-
     if (s.eof()) {
         return err(s, "unexpected EOF while parsing list");
-    }
-
-    const char = s.peek();
-
-    // Check for empty lists: (), [], {}
-    if (open == '(' and char == ')') {
-        s.skip();
-        return s.returnDatum(value.nil.nil);
-    }
-    if (open == '[' and char == ']') {
-        s.skip();
-        return s.returnDatum(value.pair.cons(
-            value.rune.pack("SQUARE"),
-            value.nil.nil,
-        ));
-    }
-    if (open == '{' and char == '}') {
-        s.skip();
-        return s.returnDatum(value.pair.cons(
-            value.rune.pack("BRACE"),
-            value.nil.nil,
-        ));
     }
 
     s.opening_bracket = open;
+    return if (isEndOfList(s))
+        endList(s)
+    else
+        s.recurParse(.start_parse, .continue_list);
+}
 
-    // Now we're facing the first element of the list.
-    return s.recurParse(.start_parse, .continue_list);
+fn isEndOfList(s: *State) bool {
+    return switch (s.peek()) {
+        ')', ']', '}' => true,
+        else => false,
+    };
 }
 
 fn continueList(s: *State) *State {
-    //
-    // We now consumed a list element and are at its end.  Possibilities:
-    //
-    //   (... foo| )
-    //
-    //   (... foo| . bar)
-    //
-    //   (... foo| bar baz ...)
-    //
-    // (This may be the first element, or any other; doesn't matter.)
-    //
+    s.context = value.pair.cons(s.retval, s.context);
 
     s.consumeBlanks();
-
     if (s.eof()) {
         return err(s, "unexpected EOF while parsing list");
     }
 
-    const stack = value.pair.cons(s.retval, s.list_stack);
-
-    const open = s.opening_bracket;
-    const char = s.peek();
-
-    // Check for proper ending: (foo bar baz)
-    if (open == '(' and char == ')') {
-        s.skip();
-        return s.returnDatum(list.reverse(stack));
-    }
-    if (open == '[' and char == ']') {
-        s.skip();
-        return s.returnDatum(value.pair.cons(
-            value.rune.pack("SQUARE"),
-            list.reverse(stack),
-        ));
-    }
-    if (open == '{' and char == '}') {
-        s.skip();
-        return s.returnDatum(value.pair.cons(
-            value.rune.pack("BRACE"),
-            list.reverse(stack),
-        ));
+    if (isEndOfList(s)) {
+        s.context = list.reverse(s.context);
+        return endList(s);
     }
 
-    s.list_stack = stack;
-
-    // Check for improper ending: (foo bar . baz)
-    if (char == '.') {
+    if (s.peek() == '.') {
         s.skip();
-
-        // We should now be at (... foo .| bar) and whitespace must follow.
         // Scheme allows (foo .(bar)) but we don't.  Mind your spaces!
         if (!s.isWhitespace()) {
             return err(s, "misplaced period");
         }
-
-        return s.recurParse(.start_parse, .end_improper_list);
+        return s.recurParse(.start_parse, .finalize_improper_list);
     }
 
-    // OK, we're at the next element now and the list is going on.
     return s.recurParse(.start_parse, .continue_list);
 }
 
+fn finalizeImproperList(s: *State) *State {
+    s.context = list.reverseWithTail(s.context, s.retval);
+    return endImproperList(s);
+}
+
 fn endImproperList(s: *State) *State {
-    //
-    // We're at the very end of an improper list now:
-    //
-    //   (... foo . bar| )
-    //
-    // There's another sneaky possibility though: trailing datum comments!
-    //
-    //   (... foo . bar #;DATUM ... )
-    //
-    // These were being handled "automatically" while parsing regular list
-    // elements, but here we have to special-handle them; see below.
-    //
-
     s.consumeBlanks();
-
     if (s.eof()) {
         return err(s, "unexpected EOF while parsing list");
     }
 
-    const result = list.reverseWithTail(s.list_stack, s.retval);
-
-    const char = s.getc();
-    const open = s.opening_bracket;
-
-    if (open == '(' and char == ')') {
-        return s.returnDatum(result);
-    }
-    if (open == '[' and char == ']') {
-        const rune = value.rune.pack("SQUARE");
-        return s.returnDatum(value.pair.cons(rune, result));
-    }
-    if (open == '{' and char == '}') {
-        const rune = value.rune.pack("BRACE");
-        return s.returnDatum(value.pair.cons(rune, result));
+    if (isEndOfList(s)) {
+        return endList(s);
     }
 
-    // Handle trailing datum comments, but don't allow anything else!
-
-    if (char == '#' and s.peek() == ';') {
-        s.skip();
-
-        // We will "abuse" the list_stack field to save the result.
-        s.list_stack = result;
-        return s.recurParse(.start_datum, .handle_trailing_datum_comments);
+    if (s.getc() == '#') {
+        if (s.eof()) {
+            return err(s, "unexpected EOF after hash while parsing list");
+        }
+        if (s.getc() == ';') {
+            return s.recurParse(.start_datum, .end_improper_list);
+        }
     }
 
     return err(s, "malformed list / extra datum at end of improper list");
 }
 
-fn handleTrailingDatumComments(s: *State) *State {
-    s.consumeBlanks();
-
-    if (s.eof()) {
-        return err(s, "unexpected EOF while parsing list");
-    }
-
-    const result = s.list_stack;
-
-    const char = s.getc();
+fn endList(s: *State) *State {
     const open = s.opening_bracket;
+    const char = s.getc();
 
+    // Check for proper ending: (foo bar baz)
     if (open == '(' and char == ')') {
-        return s.returnDatum(result);
+        return s.returnDatum(s.context);
     }
     if (open == '[' and char == ']') {
         const rune = value.rune.pack("SQUARE");
-        return s.returnDatum(value.pair.cons(rune, result));
+        return s.returnDatum(value.pair.cons(rune, s.context));
     }
     if (open == '{' and char == '}') {
         const rune = value.rune.pack("BRACE");
-        return s.returnDatum(value.pair.cons(rune, result));
+        return s.returnDatum(value.pair.cons(rune, s.context));
     }
 
-    // Handle trailing datum comments, but don't allow anything else!
-
-    if (char == '#' and s.peek() == ';') {
-        s.skip();
-
-        // We will "abuse" the list_stack field to save the result.
-        s.list_stack = result;
-        return s.recurParse(.start_datum, .handle_trailing_datum_comments);
-    }
-
-    return err(s, "malformed list / extra datum at end of improper list");
-}
-
-fn handlePlusMinus(s: *State) *State {
-    return s;
-}
-
-fn handleDigit(s: *State) *State {
-    return s;
+    return err(s, "wrong closing bracket for list");
 }
 
 fn err(s: *State, msg: []const u8) noreturn {

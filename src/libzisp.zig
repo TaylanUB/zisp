@@ -6,8 +6,8 @@ const builtin = @import("builtin");
 const testing = std.testing;
 
 pub const gc = @import("libzisp/gc.zig");
-pub const parser = @import("libzisp/parser.zig");
 pub const value = @import("libzisp/value.zig");
+pub const parser = @import("libzisp/io/parser.zig");
 
 pub const Value = value.Value;
 pub const Bucket = gc.Bucket;
