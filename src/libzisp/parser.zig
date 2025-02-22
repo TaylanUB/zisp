@@ -3,21 +3,29 @@
 //
 // Zisp s-expressions come in two flavors: code (sugar) and data (no sugar).
 //
-// Code expressions are first parsed into the same data types which the data
-// expressions can express; it's merely surface-level syntax sugar.
+// However, code expressions are parsed into the same data types which the data
+// expressions can represent, so homoiconicity is preserved.
 //
-// Data expressions don't support any syntax sugar and have a simple format,
-// only being able to represent the following data types:
+// The "sugar" used in code expressions is merely shorthand for more complex
+// data expressions, which could have been written by hand.
 //
-//   string -> foo , "foo bar"
+// Data expressions have a very simple format, and are only able to express a
+// minimal set of data types:
 //
-//   number -> 123 , -1.23 , +123 , +nan.0 , -inf.0 , ...
+//   string -> foo , "foo bar"     ;symbols and strings are the same data type
 //
-//   rune   -> #foo     ;limited to 6 ASCII letters (a - z, A - Z)
+//   number -> -1.2 , +nan.0 , ... ;this is the most complex type to represent
 //
-//   list   -> (...)    ;the usual: actually pairs; may be improper
+//   rune   -> #foo                ;limited to 6 ASCII letters (a - z, A - Z)
 //
-//   null   -> ()       ;also called nil around here
+//   pair   -> (DATUM . DATUM)     ;the only composite data type supported
+//
+//   nil    -> ()                  ;we prefer the term nil over null
+//
+// The list short-hand syntax may be considered the only "syntax sugar" that is
+// supported by the data parser:
+//
+//   (DATUM DATUM DATUM)  ->  (DATUM . (DATUM . (DATUM . ())))
 //
 // We may use terms like "code parser" and "data parser" out of convenience,
 // although there may only be a single parser that implements both formats by
@@ -32,7 +40,7 @@
 //
 //   'foo     -> (#QUOTE . foo)
 //
-// These can combine:
+// These can combine arbitrarily:
 //
 //   #{...}   -> (#HASH #BRACE ...)
 //
@@ -43,14 +51,29 @@
 // As a specialty, double-quoted strings are actually considered sugar by the
 // code parser, and are transformed as follows into data:
 //
-//   "..."    -> (#QUOTE "...")
+//   "..."    -> (#STRING . "...")
 //
 // (Otherwise, all string literals would be identifiers, or all identifiers
 // would be string literals, because Zisp doesn't differentiate strings and
-// symbols like traditional lisps.)
+// symbols like traditional lisps.  Also, note that although we could reuse
+// #QUOTE here, instead of using #STRING, this would make it impossible to
+// differentiate between the expressions #'foo and #"foo" once parsing is
+// finished, even though we may want to give them different meanings.)
 //
-// Runes are case-sensitive, and the code parser emits runes using only capital
-// letters so as to leave lowercase runes free for user extensions.
+// Runes are case-sensitive, and the code parser only emits runes using
+// upper-case letters, so lower-case runes are free for user extensions.
+//
+// Note that 'foo becomes (quote foo) in Scheme, but (#QUOTE . foo) in Zisp.
+// The operand of #QUOTE is the entire cdr.  The same principle is used when
+// parsing other sugar:
+//
+//          Incorrect                              Correct
+//
+//   #(x y z) -> (#HASH (x y z))            #(x y z) -> (#HASH x y z)
+//
+//   [x y z]  -> (#SQUARE (x y z))          [x y z]  -> (#SQUARE x y z)
+//
+//   #{x}     -> (#HASH (#BRACE (x)))       #{x}     -> (#HASH #BRACE x)
 //
 //
 // === Decoder ===
@@ -64,7 +87,7 @@
 // Runes may be decoded in isolation as well, rather than transforming a list
 // whose head they appear in.  This is how #true and #false are implemented.
 //
-// The decoder interprets (#QUOTE ...) to implement the traditional quoting
+// The decoder recognizes (#QUOTE ...) to implement the traditional quoting
 // mechanism, but in a better way:
 //
 // Traditional quote is "unhygienic" in Scheme terms.  An expression such as
@@ -88,25 +111,44 @@
 // not limited by the stack size.
 //
 // All state/context is passed around via a struct pointer.  The parser has a
-// main loop which calls a function, passes it the state, and expects to get a
-// new state pointer in return, which tells which function the main loop should
-// call next, based on the .next field of the state.
+// main loop which calls a function, passing it the state, and also expects a
+// state pointer in return.
 //
-// When a called function wants to call the parser recursively, it sets the
-// .next field to an enumeration value that indicates where the parser should
-// return to after it's done with the sub-parsing, and then constructs a new
-// state struct, saving a pointer to the original in a .parent field.
+// The state has a .next field, which indicates which function the main loop
+// should call next.  It also has a .parent field, used as follows:
 //
-// Making the parser "return" is a matter of setting the .retval field, and
-// setting the .next field to the value .finish, to indicate to the main loop
-// that it should either pass control back to the parent, or finish parsing.
+// If a function wants to call the parser recursively, it sets the .next field
+// of the current state to where the recursive call should return to, then it
+// creates a new state with a given starting point, sets its .parent field to
+// the current state, and returns the new state pointer.
+//
+// If a function wants to make the parser return, it sets the .retval field of
+// the current state, and sets .next to the .perform_return value.  This makes
+// the main loop either return to the parent state (after copying the .retval
+// field from child to parent), or if there is no parent state, it returns the
+// value as the top-level result.
+//
+// Note: While it's possible to simply set .next and return the current state,
+// to have another function be called next (possibly even setting .retval to
+// pass a value to it), this is completely unnecessary.  A few non-recursive
+// function calls will obviously not blow the stack.  It's only recursive
+// parsing that we use these fields for.
+//
+// Note 2: When calling the parser recursively, it may seem sensible to always
+// set the .next of the new state to .start_datum, because you already cleared
+// incoming whitespace and comments from the stream.  However, in some cases,
+// you must set it to .start_parse instead.  This is due to datum comments.
+// After a datum comment is parsed, the parser will ignore it and restore the
+// previous state, to try again what it was doing.  If the state was set to
+// .start_datum, this means no whitespace or comments would be tolerated after
+// the datum comment.
 //
 //
 // === Notation used in comments ===
 //
 // Some comments throughout the file give you an example of where the parser
-// currently is in a stream.  These illustrations use the pipe symbol, which
-// looks like a cursor, to indicate the current position of the parser:
+// currently might be in a stream.  These illustrations use the pipe symbol,
+// which looks like a cursor, to indicate the current position:
 //
 //   (foo| bar baz)   <- parser arrived at the end of the string foo
 //
@@ -129,13 +171,13 @@ const State = struct {
 
     mode: enum { code, data } = .code,
 
-    next: Next = .start_parsing,
+    next: Fn = .start_parse,
 
     parent: ?*State = null,
 
     datum_rune: Value = value.boole.f,
     list_stack: Value = value.nil.nil,
-    opening_bracket: enum { paren, square, brace } = .paren,
+    opening_bracket: u8 = 0,
     opening_quote: enum { quote, grave, comma } = .quote,
 
     retval: Value = value.eof.eof,
@@ -191,23 +233,24 @@ const State = struct {
         return self.peek() == 0 and self.pos == self.input.len - 1;
     }
 
-    fn newSubstate(self: *State, next: Next) *State {
+    fn recurParse(self: *State, start_from: Fn, return_to: Fn) *State {
         const sub = self.alloc.create(State) catch @panic("OOM");
         sub.* = .{ .alloc = self.alloc, .input = self.input };
         sub.pos = self.pos;
         sub.mode = self.mode;
-        sub.next = next;
+        sub.next = start_from;
         sub.parent = self;
+        self.next = return_to;
         return sub;
     }
 
-    fn setReturn(self: *State, val: Value) *State {
+    fn returnDatum(self: *State, val: Value) *State {
         self.retval = val;
-        self.next = .finish;
+        self.next = .perform_return;
         return self;
     }
 
-    fn finish(self: *State) ?*State {
+    fn performReturn(self: *State) ?*State {
         if (self.parent) |parent| {
             parent.retval = self.retval;
             parent.pos = self.pos;
@@ -222,45 +265,39 @@ const State = struct {
 // Probably best *not* to use function pointers here, but rather dispatch to
 // functions manually based on enum value.  This should help the optimizer.
 
-const Next = enum {
-    start_parsing,
+const Fn = enum {
+    start_parse,
     start_datum,
     end_hash_datum,
     end_rune_datum,
     end_quote,
     continue_list,
     end_improper_list,
-    finish,
+    handle_trailing_datum_comments,
+    perform_return,
 };
 
 pub fn parse(input: []const u8) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     var top = State{ .alloc = gpa.allocator(), .input = input };
     var s = &top;
-    while (true) {
-        s = switch (s.next) {
-            .start_parsing => startParsing(s),
-            .start_datum => startDatum(s),
-            .end_hash_datum => endHashDatum(s),
-            .end_rune_datum => endRuneDatum(s),
-            .end_quote => endQuote(s),
-            .continue_list => continueList(s),
-            .end_improper_list => endImproperList(s),
-            .finish => s.finish() orelse break,
-        };
-    }
-    if (s.eof() or s.isFinalNull()) {
-        return s.retval;
-    } else {
-        // Should never happen.
-        err(s, "PARSER BUG: unconsumed input");
-    }
+    while (true) s = switch (s.next) {
+        .start_parse => startParse(s),
+        .start_datum => startDatum(s),
+        .end_hash_datum => endHashDatum(s),
+        .end_rune_datum => endRuneDatum(s),
+        .end_quote => endQuote(s),
+        .continue_list => continueList(s),
+        .end_improper_list => endImproperList(s),
+        .handle_trailing_datum_comments => handleTrailingDatumComments(s),
+        .perform_return => s.performReturn() orelse return s.retval,
+    };
 }
 
-fn startParsing(s: *State) *State {
+fn startParse(s: *State) *State {
     s.consumeBlanks();
     if (s.eof()) {
-        return s.setReturn(value.eof.eof);
+        return s.returnDatum(value.eof.eof);
     }
     return switch (s.peek()) {
         // whitespace already consumed
@@ -273,13 +310,13 @@ fn startParsing(s: *State) *State {
 // This is called when we *immediately* expect a datum and nothing else; for
 // example, no whitespace or comments, because they've already been consumed.
 fn startDatum(s: *State) *State {
-    if (s.isWhitespace()) {
-        return err(s, "expected datum, got whitespace");
-    }
     if (s.eof()) {
         return err(s, "expected datum, got EOF");
     }
-    return switch (s.getc()) {
+    if (s.isWhitespace()) {
+        return err(s, "expected datum, got whitespace");
+    }
+    return switch (s.peek()) {
         // whitespace checked above
         0...31, 127...255 => err(s, "invalid character"),
 
@@ -291,13 +328,13 @@ fn startDatum(s: *State) *State {
 
         '"' => startQuotedString(s),
 
-        '\'', '`', ',' => |c| startQuote(s, c),
+        '\'', '`', ',' => startQuote(s),
 
-        '(', '[', '{' => |c| startList(s, c),
+        '(', '[', '{' => startList(s),
 
-        '+', '-' => |c| handlePlusMinus(s, c),
+        '+', '-' => handlePlusMinus(s),
 
-        '0'...'9' => |c| handleDigit(s, c),
+        '0'...'9' => handleDigit(s),
 
         // Periods only allowed between digits, and to express improper lists.
         // Things like the following look too much like it could be a typo:
@@ -311,6 +348,7 @@ fn startDatum(s: *State) *State {
 }
 
 fn handleHash(s: *State) *State {
+    s.skip();
     //
     // We just consumed a hash.  Possibilities include:
     //
@@ -321,11 +359,11 @@ fn handleHash(s: *State) *State {
     //   #|DATUM     ;hash-datum (code mode only)
     //
 
-    if (s.isWhitespace()) {
-        return err(s, "whitespace after hash");
-    }
     if (s.eof()) {
         return err(s, "EOF after hash");
+    }
+    if (s.isWhitespace()) {
+        return err(s, "whitespace after hash");
     }
 
     // Is it a rune?  #foo
@@ -339,18 +377,17 @@ fn handleHash(s: *State) *State {
         s.skip();
         // Don't change s.next in this case.  Just let the parser try to redo
         // what it was doing as soon as the commented-out datum has been read.
-        return s.newSubstate(.start_datum);
+        return s.recurParse(.start_datum, s.next);
     }
 
     // Otherwise, it must be a hash-datum.  #DATUM
 
     // But data mode doesn't allow that.
     if (s.mode == .data) {
-        return err(s, "invalid use of hash in data mode");
+        return err(s, "use of hash-datum sequence not allowed in data mode");
     }
 
-    s.next = .end_hash_datum;
-    return s.newSubstate(.start_datum);
+    return s.recurParse(.start_datum, .end_hash_datum);
 }
 
 fn handleRune(s: *State) *State {
@@ -362,12 +399,9 @@ fn handleRune(s: *State) *State {
     //   #foo|(...)
     //
 
-    if (s.eof() or switch (s.peek()) {
-        '\t', '\n', ' ', ')', ']', '}' => true,
-        else => false,
-    }) {
+    if (isEndOfRune(s)) {
         // Nope, just a stand-alone rune.
-        return s.setReturn(rune);
+        return s.returnDatum(rune);
     }
 
     // Otherwise, it's followed by a datum, like: #foo(...)
@@ -378,8 +412,7 @@ fn handleRune(s: *State) *State {
     }
 
     s.datum_rune = rune;
-    s.next = .end_rune_datum;
-    return s.newSubstate(.start_datum);
+    return s.recurParse(.start_datum, .end_rune_datum);
 }
 
 fn readRune(s: *State) ?Value {
@@ -402,43 +435,50 @@ fn readRune(s: *State) ?Value {
     return value.rune.pack(buf[0..i]);
 }
 
+fn isEndOfRune(s: *State) bool {
+    return s.eof() or switch (s.peek()) {
+        '\t', '\n', ' ', ')', ']', '}' => true,
+        else => false,
+    };
+}
+
 fn endRuneDatum(s: *State) *State {
-    return s.setReturn(value.pair.cons(
+    return s.returnDatum(value.pair.cons(
         s.datum_rune,
         s.retval,
     ));
 }
 
 fn endHashDatum(s: *State) *State {
-    return s.setReturn(value.pair.cons(
+    return s.returnDatum(value.pair.cons(
         value.rune.pack("HASH"),
         s.retval,
     ));
 }
 
 fn startQuotedString(s: *State) *State {
-    // We are now here:
-    //
-    //   "|..."
-    //
+    // Consume opening quote.
+    s.skip();
+
     const str = readQuotedString(s) catch return err(s, "unclosed string");
     if (s.mode == .code) {
-        // "foo bar" => (#QUOTE . "foo bar")
-        const rune = value.rune.pack("QUOTE");
+        // "foo bar" => (#STRING . "foo bar")
+        const rune = value.rune.pack("STRING");
         const pair = value.pair.cons(rune, str);
-        return s.setReturn(pair);
+        return s.returnDatum(pair);
     } else {
-        return s.setReturn(str);
+        return s.returnDatum(str);
     }
 }
 
-const StringReadError = enum { UnclosedString };
+// RQS = Read Quoted String
+const RqsError = enum { Unclosed };
 
-fn readQuotedString(s: *State) error{UnclosedString}!Value {
+fn readQuotedString(s: *State) !Value {
     return try readQuotedSstr(s) orelse readQuotedLongString(s);
 }
 
-fn readQuotedSstr(s: *State) error{UnclosedString}!?Value {
+fn readQuotedSstr(s: *State) !?Value {
     // We will reset to this position if we fail.
     const start_pos = s.pos;
 
@@ -459,7 +499,7 @@ fn readQuotedSstr(s: *State) error{UnclosedString}!?Value {
         buf[i] = c;
         i += 1;
     }
-    return error.UnclosedString;
+    return error.Unclosed;
 }
 
 fn readQuotedLongString(s: *State) Value {
@@ -486,17 +526,16 @@ fn readBareSstr(s: *State) ?*State {
             return null;
         }
         buf[i] = s.getc();
-        i += 1;
     }
 
-    return s.setReturn(value.sstr.pack(buf[0..i]));
+    return s.returnDatum(value.sstr.pack(buf[0..i]));
 }
 
 fn isBareStringEnd(s: *State) bool {
     // We will ignore illegal characters here, because they aren't consumed by
     // this function; whatever code comes next must handle them.
     return s.eof() or switch (s.peek()) {
-        0...31, 127...255 => true,
+        0...32, 127...255 => true,
         '(', ')', '[', ']', '{', '}', ';', '#', '"', '\'', '`', ',' => true,
         else => false,
     };
@@ -506,21 +545,14 @@ fn readBareLongString(s: *State) *State {
     return err(s, "NOT YET IMPLEMENTED");
 }
 
-fn startQuote(s: *State, c: u8) *State {
-    // Allowed in Scheme, but why?  Not in Zisp.
-    if (s.isWhitespace()) {
-        return err(s, "whitespace after apostrophe");
-    }
-    s.opening_quote = switch (c) {
+fn startQuote(s: *State) *State {
+    s.opening_quote = switch (s.getc()) {
         '\'' => .quote,
         '`' => .grave,
         ',' => .comma,
         else => unreachable,
     };
-    const sub = s.newSubstate(.start_datum);
-    sub.mode = .data;
-    s.next = .end_quote;
-    return sub;
+    return s.recurParse(.start_datum, .end_quote);
 }
 
 fn endQuote(s: *State) *State {
@@ -529,50 +561,66 @@ fn endQuote(s: *State) *State {
         .grave => "GRAVE",
         .comma => "COMMA",
     };
-    return s.setReturn(value.pair.cons(
+    return s.returnDatum(value.pair.cons(
         value.rune.pack(name),
         s.retval,
     ));
 }
 
-fn startList(s: *State, open: u8) *State {
+fn startList(s: *State) *State {
+    const open = s.getc();
+
     if (s.mode == .data and open != '(') {
         return err(s, "invalid opening bracket in data mode");
     }
 
     s.consumeBlanks();
 
-    // Check for empty lists: (), [], {}
-    if (open == '(' and s.peek() == ')') {
-        s.skip();
-        return s.setReturn(value.nil.nil);
+    if (s.eof()) {
+        return err(s, "unexpected EOF while parsing list");
     }
-    if (open == '[' and s.peek() == ']') {
+
+    const char = s.peek();
+
+    // Check for empty lists: (), [], {}
+    if (open == '(' and char == ')') {
         s.skip();
-        return s.setReturn(value.pair.cons(
+        return s.returnDatum(value.nil.nil);
+    }
+    if (open == '[' and char == ']') {
+        s.skip();
+        return s.returnDatum(value.pair.cons(
             value.rune.pack("SQUARE"),
             value.nil.nil,
         ));
     }
-    if (open == '{' and s.peek() == '}') {
+    if (open == '{' and char == '}') {
         s.skip();
-        return s.setReturn(value.pair.cons(
+        return s.returnDatum(value.pair.cons(
             value.rune.pack("BRACE"),
             value.nil.nil,
         ));
     }
 
-    s.opening_bracket = switch (open) {
-        '(' => .paren,
-        '[' => .square,
-        '{' => .brace,
-        else => unreachable,
-    };
-    s.next = .continue_list;
-    return s.newSubstate(.start_datum);
+    s.opening_bracket = open;
+
+    // Now we're facing the first element of the list.
+    return s.recurParse(.start_parse, .continue_list);
 }
 
 fn continueList(s: *State) *State {
+    //
+    // We now consumed a list element and are at its end.  Possibilities:
+    //
+    //   (... foo| )
+    //
+    //   (... foo| . bar)
+    //
+    //   (... foo| bar baz ...)
+    //
+    // (This may be the first element, or any other; doesn't matter.)
+    //
+
     s.consumeBlanks();
 
     if (s.eof()) {
@@ -585,20 +633,20 @@ fn continueList(s: *State) *State {
     const char = s.peek();
 
     // Check for proper ending: (foo bar baz)
-    if (open == .paren and char == ')') {
+    if (open == '(' and char == ')') {
         s.skip();
-        return s.setReturn(list.reverse(stack));
+        return s.returnDatum(list.reverse(stack));
     }
-    if (open == .square and char == ']') {
+    if (open == '[' and char == ']') {
         s.skip();
-        return s.setReturn(value.pair.cons(
+        return s.returnDatum(value.pair.cons(
             value.rune.pack("SQUARE"),
             list.reverse(stack),
         ));
     }
-    if (open == .brace and char == '}') {
+    if (open == '{' and char == '}') {
         s.skip();
-        return s.setReturn(value.pair.cons(
+        return s.returnDatum(value.pair.cons(
             value.rune.pack("BRACE"),
             list.reverse(stack),
         ));
@@ -613,51 +661,108 @@ fn continueList(s: *State) *State {
         // We should now be at (... foo .| bar) and whitespace must follow.
         // Scheme allows (foo .(bar)) but we don't.  Mind your spaces!
         if (!s.isWhitespace()) {
-            return err(s, "invalid use of period");
+            return err(s, "misplaced period");
         }
 
-        s.consumeBlanks();
-
-        s.next = .end_improper_list;
-        return s.newSubstate(.start_datum);
+        return s.recurParse(.start_parse, .end_improper_list);
     }
 
-    // OK, next element.
-    return s.newSubstate(.start_datum);
+    // OK, we're at the next element now and the list is going on.
+    return s.recurParse(.start_parse, .continue_list);
 }
 
 fn endImproperList(s: *State) *State {
+    //
+    // We're at the very end of an improper list now:
+    //
+    //   (... foo . bar| )
+    //
+    // There's another sneaky possibility though: trailing datum comments!
+    //
+    //   (... foo . bar #;DATUM ... )
+    //
+    // These were being handled "automatically" while parsing regular list
+    // elements, but here we have to special-handle them; see below.
+    //
+
     s.consumeBlanks();
 
     if (s.eof()) {
-        return err(s, "unexpected EOF");
+        return err(s, "unexpected EOF while parsing list");
     }
 
     const result = list.reverseWithTail(s.list_stack, s.retval);
-    const open = s.opening_bracket;
+
     const char = s.getc();
-    if (open == .paren and char == ')') {
-        return s.setReturn(result);
+    const open = s.opening_bracket;
+
+    if (open == '(' and char == ')') {
+        return s.returnDatum(result);
     }
-    if (open == .square and char == ']') {
+    if (open == '[' and char == ']') {
         const rune = value.rune.pack("SQUARE");
-        return s.setReturn(value.pair.cons(rune, result));
+        return s.returnDatum(value.pair.cons(rune, result));
     }
-    if (open == .brace and char == '}') {
+    if (open == '{' and char == '}') {
         const rune = value.rune.pack("BRACE");
-        return s.setReturn(value.pair.cons(rune, result));
+        return s.returnDatum(value.pair.cons(rune, result));
     }
 
-    return err(s, "malformed list or extra datum at end of improper list");
+    // Handle trailing datum comments, but don't allow anything else!
+
+    if (char == '#' and s.peek() == ';') {
+        s.skip();
+
+        // We will "abuse" the list_stack field to save the result.
+        s.list_stack = result;
+        return s.recurParse(.start_datum, .handle_trailing_datum_comments);
+    }
+
+    return err(s, "malformed list / extra datum at end of improper list");
 }
 
-fn handlePlusMinus(s: *State, c: u8) *State {
-    _ = c;
+fn handleTrailingDatumComments(s: *State) *State {
+    s.consumeBlanks();
+
+    if (s.eof()) {
+        return err(s, "unexpected EOF while parsing list");
+    }
+
+    const result = s.list_stack;
+
+    const char = s.getc();
+    const open = s.opening_bracket;
+
+    if (open == '(' and char == ')') {
+        return s.returnDatum(result);
+    }
+    if (open == '[' and char == ']') {
+        const rune = value.rune.pack("SQUARE");
+        return s.returnDatum(value.pair.cons(rune, result));
+    }
+    if (open == '{' and char == '}') {
+        const rune = value.rune.pack("BRACE");
+        return s.returnDatum(value.pair.cons(rune, result));
+    }
+
+    // Handle trailing datum comments, but don't allow anything else!
+
+    if (char == '#' and s.peek() == ';') {
+        s.skip();
+
+        // We will "abuse" the list_stack field to save the result.
+        s.list_stack = result;
+        return s.recurParse(.start_datum, .handle_trailing_datum_comments);
+    }
+
+    return err(s, "malformed list / extra datum at end of improper list");
+}
+
+fn handlePlusMinus(s: *State) *State {
     return s;
 }
 
-fn handleDigit(s: *State, c: u8) *State {
-    _ = c;
+fn handleDigit(s: *State) *State {
     return s;
 }
 

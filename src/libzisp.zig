@@ -254,12 +254,16 @@ test "parse" {
     const val = parser.parse("\"foo\"");
     const r, const rl = value.rune.unpack(value.pair.car(val));
     const s, const sl = value.sstr.unpack(value.pair.cdr(val));
-    try std.testing.expectEqualStrings("QUOTE", r[0..rl]);
+    try std.testing.expectEqualStrings("STRING", r[0..rl]);
     try std.testing.expectEqualStrings("foo", s[0..sl]);
 }
 
 test "parse2" {
-    const val = parser.parse("#\"foo\"");
+    const val = parser.parse(
+        \\ ;; Testing some crazy datum comments
+        \\ ##;"bar"#;([x #"y"]{##`,'z})"foo"
+        \\ ;; end
+    );
 
     const r, const rl = value.rune.unpack(value.pair.car(val));
     try std.testing.expectEqualStrings("HASH", r[0..rl]);
@@ -267,10 +271,32 @@ test "parse2" {
     const cdr = value.pair.cdr(val);
 
     const s, const sl = value.rune.unpack(value.pair.car(cdr));
-    try std.testing.expectEqualStrings("QUOTE", s[0..sl]);
+    try std.testing.expectEqualStrings("STRING", s[0..sl]);
 
     const f, const fl = value.sstr.unpack(value.pair.cdr(cdr));
     try std.testing.expectEqualStrings("foo", f[0..fl]);
+}
 
-    _ = parser.parse("(foo \"bar\" [#x #\"baz\"] 'bat)");
+test "parse3" {
+    const val = parser.parse("(foo #;x #;(x y) #;x #bar [#x #\"baz\"] 'bat)");
+
+    const car = value.pair.car;
+    const cdr = value.pair.cdr;
+
+    // const e1 = car(val);
+    const e2 = car(cdr(val));
+    // const e3 = car(cdr(cdr(val)));
+    // const e4 = car(cdr(cdr(cdr(val))));
+
+    try std.testing.expect(value.rune.check(e2));
+}
+
+test "parse4" {
+    const val = parser.parse("(foo . #;x bar #;y)");
+
+    const s, const sl = value.sstr.unpack(value.pair.car(val));
+    try std.testing.expectEqualStrings("foo", s[0..sl]);
+
+    const f, const fl = value.sstr.unpack(value.pair.cdr(val));
+    try std.testing.expectEqualStrings("bar", f[0..fl]);
 }
