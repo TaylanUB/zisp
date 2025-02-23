@@ -125,48 +125,68 @@
 //
 // Instead of using recursion directly, the parser is written in something akin
 // to a manual continuation-passing style, which ensures that parsing depth is
-// not limited by the stack size.
+// not limited by the stack size.  This is also called "trampolining."
 //
 // All state/context is passed around via a struct pointer.  The parser has a
 // main loop which calls a function, passing it the state, and also expects a
 // state pointer in return.
 //
-// The state has a .next field, which indicates which function the main loop
-// should call next.  It also has a .parent field, used as follows:
+// The state has a .next field, that indicates which function the main loop
+// should call next.  It also has a .parent field, potentially linking to a
+// previous state.  These two fields are used as follows:
 //
 // If a function wants to call the parser recursively, it sets the .next field
-// of the current state to where the recursive call should return to, then it
-// creates a new state with a given starting point, sets its .parent field to
-// the current state, and returns the new state pointer.
+// of the *current* state to where the recursive call should return to.  Then,
+// it creates a new state, sets the .next field of that one to where it should
+// start (either .start_parse or .start_datum), sets .parent to the old state,
+// and returns the new one.
 //
-// If a function wants to make the parser return, it sets the .retval field of
-// the current state, and sets .next to the .perform_return value.  This makes
-// the main loop either return to the parent state (after copying the .retval
-// field from child to parent), or if there is no parent state, it returns the
-// value as the top-level result.
+// So, the main loop will now do what the newly returned state is instructing.
 //
-// Note: While it's possible to simply set .next and return the current state,
-// to have another function be called next (possibly even setting .retval to
+// If a function wants to make the parser return from this recursive parsing
+// routine, it sets the .retval field of the current state, and sets .next to
+// the special .perform_return instruction.  This makes the main loop copy the
+// value in .retval into the .retval field of the parent state, and reinstates
+// it, continuing with whatever was put in its .next field, which should be a
+// function that will consume the return value.
+//
+// If .parent is null, the main loop returns .retval as the final result.
+//
+// Some further notes:
+//
+// While it's possible to just set .next and return the current state, to make
+// the main loop call another function next (possibly even setting .retval to
 // pass a value to it), this is completely unnecessary.  A few non-recursive
-// function calls will obviously not blow the stack.  It's only recursive
-// parsing that we use these fields for.
+// function calls won't blow the stack.  It's only recursive parsing that we
+// need the above strategy for.
 //
-// Note 2: When calling the parser recursively, it may seem sensible to always
-// set the .next of the new state to .start_datum, because you already cleared
-// incoming whitespace and comments from the stream.  However, in some cases,
-// you must set it to .start_parse instead.  This is due to datum comments.
-// After a datum comment is parsed, the parser will ignore it and restore the
-// previous state, to try again what it was doing.  If the state was set to
-// .start_datum, this means no whitespace or comments would be tolerated after
-// the datum comment.
+// The difference between .start_parse and .start_datum is that the former will
+// allow whitespace and comments at the beginning, whereas the latter expects a
+// datum immediately without anything else in front of it.
 //
-// Note 3: When it comes to pairs/lists, we mainly try to parse them as lists,
-// and a pair becomes a special-case of an improper list (two elements).  This
-// has the advantage of saving memory: If we implemented list parsing as pair
-// parsing, we would be calling the parser recursively, deeper and deeper, for
-// every pair that the list is made up of.  Although we're not limited by stack
-// space (thanks to the strategy described above) this would still waste memory
-// while parsing.
+// When calling the parser recursively, it may seem logical to always make it
+// start with .start_datum, because we already cleared whitespace and comments
+// out of the way.  However, in some cases, we must use .start_parse instead.
+// This is because of datum comments.  When one appears, we start a recursive
+// parser, but instead of making it return to a function that will consume the
+// result, we make it return to the original state's starting point.  This way,
+// the parser "retries" what it was originally doing, with the comment out of
+// the way.  If we always used .start_datum for recursive parsing, this would
+// never allow whitespace *after* a datum comment, because we would be back at
+// .start_datum as soon as we reach the end of the datum comment.  Whitespace
+// after a datum comment is sometimes allowed and sometimes not, so there's no
+// generic solution that's always correct:
+//
+//   (foo #;bar baz)     ;; whitespace after #;bar allowed
+//
+//   #'#;(+ 1 2)(+ 3 4)  ;; whitespace after #;(+ 1 2) not allowed
+//
+// When it comes to pairs and lists, we basically treat everything as a list,
+// and a pair is just seen as the shortest possible improper list.  This saves
+// memory: If we implemented list parsing as pair parsing, we would be calling
+// the parser recursively, deeper and deeper, for every list element.  Though
+// we're not limited by stack space thanks to the strategy described above, it
+// would still waste memory by creating tons of new state objects.
 //
 //
 // === Notation used in comments ===
@@ -189,93 +209,110 @@ const Value = value.Value;
 
 pub const Mode = enum { code, data };
 
-const State = struct {
+const TopState = struct {
     alloc: std.mem.Allocator,
     input: []const u8,
     pos: usize = 0,
     mode: Mode = undefined,
+};
+
+const State = struct {
+    top: *TopState,
+
     next: Fn = .start_parse,
     parent: ?*State = null,
-    context: Value = undefined,
-    opening_bracket: u8 = undefined,
     retval: Value = undefined,
 
-    fn eof(self: *State) bool {
-        return self.pos >= self.input.len;
+    // To store accumulated context, such as list elements.
+    context: Value = undefined,
+
+    // To remember what kind of list we're in: () [] {}
+    opening_bracket: u8 = undefined,
+
+    fn mode(s: *State) Mode {
+        return s.top.mode;
     }
 
-    fn peek(self: *State) u8 {
-        return self.input[self.pos];
+    fn eof(s: *State) bool {
+        return s.top.pos >= s.top.input.len;
     }
 
-    fn skip(self: *State) void {
-        self.pos += 1;
+    fn peek(s: *State) u8 {
+        return s.top.input[s.top.pos];
     }
 
-    fn getc(self: *State) u8 {
-        const c = self.peek();
-        self.skip();
+    fn skip(s: *State) void {
+        s.top.pos += 1;
+    }
+
+    fn getc(s: *State) u8 {
+        const c = s.peek();
+        s.skip();
         return c;
     }
 
+    fn pos(s: *State) usize {
+        return s.top.pos;
+    }
+
+    fn resetPos(s: *State, p: usize) void {
+        s.top.pos = p;
+    }
+
     // Consumes whitespace and line comments.
-    fn consumeBlanks(self: *State) void {
-        while (!self.eof()) {
-            if (self.isWhitespace()) {
-                self.skip();
-            } else if (self.peek() == ';') {
-                self.skip();
-                self.consumeLineComment();
+    fn consumeBlanks(s: *State) void {
+        while (!s.eof()) {
+            if (s.isWhitespace()) {
+                s.skip();
+            } else if (s.peek() == ';') {
+                s.skip();
+                s.consumeLineComment();
             } else {
                 return;
             }
         }
     }
 
-    fn consumeLineComment(self: *State) void {
-        while (!self.eof()) {
-            if (self.getc() == '\n') {
+    fn consumeLineComment(s: *State) void {
+        while (!s.eof()) {
+            if (s.getc() == '\n') {
                 return;
             }
         }
     }
 
-    fn isWhitespace(self: *State) bool {
-        return switch (self.peek()) {
+    fn isWhitespace(s: *State) bool {
+        return switch (s.peek()) {
             '\t', '\n', ' ' => true,
             else => false,
         };
     }
 
-    fn isFinalNull(self: *State) bool {
-        return self.peek() == 0 and self.pos == self.input.len - 1;
+    fn isFinalNull(s: *State) bool {
+        return s.peek() == 0 and s.top.pos == s.top.input.len - 1;
     }
 
-    fn recurParse(self: *State, start_from: Fn, return_to: Fn) *State {
-        const newState = self.alloc.create(State) catch @panic("OOM");
+    fn recurParse(s: *State, start_from: Fn, return_to: Fn) *State {
+        const newState = s.top.alloc.create(State) catch @panic("OOM");
         newState.* = .{
-            .alloc = self.alloc,
-            .input = self.input,
-            .pos = self.pos,
-            .mode = self.mode,
+            .top = s.top,
             .next = start_from,
-            .parent = self,
+            .parent = s,
         };
-        self.next = return_to;
+        s.next = return_to;
         return newState;
     }
 
-    fn returnDatum(self: *State, val: Value) *State {
-        self.retval = val;
-        self.next = .perform_return;
-        return self;
+    fn returnDatum(s: *State, val: Value) *State {
+        s.retval = val;
+        s.next = .perform_return;
+        return s;
     }
 
-    fn performReturn(self: *State) ?*State {
-        if (self.parent) |parent| {
-            parent.retval = self.retval;
-            parent.pos = self.pos;
-            parent.alloc.destroy(self);
+    fn performReturn(s: *State) ?*State {
+        if (s.parent) |parent| {
+            parent.retval = s.retval;
+            s.top.alloc.destroy(s);
             return parent;
         } else {
             return null;
@@ -304,8 +341,10 @@ pub fn parseCode(input: []const u8) Value {
 
 pub fn parse(input: []const u8, mode: Mode) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    var top = State{ .alloc = gpa.allocator(), .input = input, .mode = mode };
-    var s = &top;
+    const alloc = gpa.allocator();
+    var top = TopState{ .alloc = alloc, .input = input, .mode = mode };
+    var s0 = State{ .top = &top };
+    var s = &s0;
     while (true) s = switch (s.next) {
         .start_parse => startParse(s),
         .start_datum => startDatum(s),
@@ -404,7 +443,7 @@ fn handleHash(s: *State) *State {
     // Otherwise, it must be a hash-datum.  #DATUM
 
     // But data mode doesn't allow that.
-    if (s.mode == .data) {
+    if (s.mode() == .data) {
         return err(s, "use of hash-datum sequence not allowed in data mode");
     }
 
@@ -427,7 +466,7 @@ fn handleRune(s: *State) *State {
     // Otherwise, it's followed by a datum, like: #foo(...)
 
     // Which is only allowed in code mode.
-    if (s.mode == .data) {
+    if (s.mode() == .data) {
         return err(s, "invalid use of hash in data mode");
     }
 
@@ -476,7 +515,7 @@ fn startQuotedString(s: *State) *State {
     s.skip();
 
     const str = readQuotedString(s) catch return err(s, "unclosed string");
-    if (s.mode == .code) {
+    if (s.mode() == .code) {
         // "foo bar" => (#STRING . "foo bar")
         const rune = value.rune.pack("STRING");
         const pair = value.pair.cons(rune, str);
@@ -495,7 +534,7 @@ fn readQuotedString(s: *State) !Value {
 
 fn readQuotedSstr(s: *State) !?Value {
     // We will reset to this position if we fail.
-    const start_pos = s.pos;
+    const start_pos = s.pos();
 
     var buf: [6]u8 = undefined;
     var i: u8 = 0;
@@ -507,7 +546,7 @@ fn readQuotedSstr(s: *State) !?Value {
         }
         if (i == 6) {
             // failed; reset and bail out
-            s.pos = start_pos;
+            s.resetPos(start_pos);
             return null;
         }
         // ok, save this byte and go on
@@ -528,7 +567,7 @@ fn startBareString(s: *State) *State {
 
 fn readBareSstr(s: *State) ?*State {
     // We will reset to this position if we fail.
-    const start_pos = s.pos;
+    const start_pos = s.pos();
 
     var buf: [6]u8 = undefined;
     var i: u8 = 0;
@@ -538,7 +577,7 @@ fn readBareSstr(s: *State) ?*State {
         }
         if (i == buf.len) {
             // failed; reset and bail out
-            s.pos = start_pos;
+            s.resetPos(start_pos);
             return null;
         }
         buf[i] = s.getc();
@@ -586,7 +625,7 @@ fn endQuote(s: *State) *State {
 fn startList(s: *State) *State {
     const open = s.getc();
 
-    if (s.mode == .data and open != '(') {
+    if (s.mode() == .data and open != '(') {
         return err(s, "invalid opening bracket in data mode");
     }
 
@@ -688,6 +727,6 @@ fn endImproperList(s: *State) *State {
 
 fn err(s: *State, msg: []const u8) noreturn {
     std.debug.print("{s}\n", .{msg});
-    std.debug.print("pos: {}\n", .{s.pos});
+    std.debug.print("pos: {}\n", .{s.pos()});
     @panic("parse error");
 }
