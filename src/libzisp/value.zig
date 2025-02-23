@@ -158,6 +158,9 @@ pub const pair = @import("value/pair.zig");
 // To fill up the u11 exponent part of a NaN.
 const FILL = 0x7ff;
 
+// Used when dealing with runes and short strings.
+pub const ShortString = std.BoundedArray(u8, 6);
+
 /// Represents a Zisp value/object.
 pub const Value = packed union {
     /// To get the value as a regular double.
