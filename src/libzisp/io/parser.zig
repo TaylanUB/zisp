@@ -217,7 +217,7 @@ const Value = value.Value;
 pub const Mode = enum { code, data };
 
 const TopState = struct {
-    alloc: std.mem.Allocator,
+    alloc: std.heap.MemoryPool(State),
     input: []const u8,
     pos: usize = 0,
     mode: Mode = undefined,
@@ -367,9 +367,9 @@ pub fn parse(input: []const u8, mode: Mode) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer if (gpa.deinit() == .leak) @panic("leak");
     const alloc = gpa.allocator();
-    // var pool: std.heap.MemoryPool(State) = .init(alloc);
-    // defer pool.deinit();
-    var top = TopState{ .alloc = alloc, .input = input, .mode = mode };
+    var pool: std.heap.MemoryPool(State) = .init(alloc);
+    defer pool.deinit();
+    var top = TopState{ .alloc = pool, .input = input, .mode = mode };
     var s0 = State{ .top = &top };
     var s = &s0;
     while (true) s = switch (s.next) {
