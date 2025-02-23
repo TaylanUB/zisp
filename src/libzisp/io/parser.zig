@@ -17,7 +17,7 @@
 //
 //   string    foo , "foo bar"    symbols and strings are the same data type
 //
-//   rune      #name              name is 1-6 ASCII letters (a - z, A - Z)
+//   rune      #name              name is: [a-zA-Z][a-zA-Z0-9]{0,5}
 //
 //   pair      (DATUM . DATUM)    the only composite data type supported
 //
@@ -65,6 +65,12 @@
 // You may be wondering about numbers.  As far as the parser is concerned,
 // numbers are strings.  It's the decoder (see below) that will turn bare
 // strings (those not marked with #STRING) into numbers where appropriate.
+//
+// Datum labels are also handled by the decoder; they desugar like so:
+//
+//   #n#       -> (#LABEL . n)
+//
+//   #n#=DATUM -> (#LABEL n . DATUM)
 //
 // Note that 'foo becomes (quote foo) in Scheme, but (#QUOTE . foo) in Zisp.
 // The operand of #QUOTE is the entire cdr.  The same principle is used when
@@ -205,6 +211,7 @@ const std = @import("std");
 const lib = @import("../lib.zig");
 const value = @import("../value.zig");
 
+const ShortString = value.ShortString;
 const Value = value.Value;
 
 pub const Mode = enum { code, data };
@@ -320,12 +327,29 @@ const State = struct {
     }
 };
 
+const CharPred = fn (u8) bool;
+const ShortStringPack = fn ([]const u8) Value;
+
+// Helper function to read runes and short strings.
+fn readShortString(
+    s: *State,
+    pred: CharPred,
+    pack: ShortStringPack,
+) ?Value {
+    var str = ShortString{};
+    while (!s.eof() and pred(s.peek())) {
+        str.append(s.getc()) catch return null;
+    }
+    return pack(str.constSlice());
+}
+
 // Probably best *not* to use function pointers here, but rather dispatch to
 // functions manually based on enum value.  This should help the optimizer.
 
 const Fn = enum {
     start_parse,
     start_datum,
+    end_datum_label,
     end_hash_datum,
     end_rune_datum,
     end_quote,
@@ -341,13 +365,17 @@ pub fn parseCode(input: []const u8) Value {
 
 pub fn parse(input: []const u8, mode: Mode) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer if (gpa.deinit() == .leak) @panic("leak");
     const alloc = gpa.allocator();
+    // var pool: std.heap.MemoryPool(State) = .init(alloc);
+    // defer pool.deinit();
     var top = TopState{ .alloc = alloc, .input = input, .mode = mode };
     var s0 = State{ .top = &top };
     var s = &s0;
     while (true) s = switch (s.next) {
         .start_parse => startParse(s),
         .start_datum => startDatum(s),
+        .end_datum_label => endDatumLabel(s),
         .end_hash_datum => endHashDatum(s),
         .end_rune_datum => endRuneDatum(s),
         .end_quote => endQuote(s),
@@ -414,6 +442,10 @@ fn handleHash(s: *State) *State {
     //
     //   #|foo       ;rune
     //
+    //   #n#=DATUM   ;datum with numeric label
+    //
+    //   #n#         ;reference to datum label
+    //
     //   #|;DATUM    ;datum comment
     //
     //   #|DATUM     ;hash-datum (code mode only)
@@ -429,6 +461,12 @@ fn handleHash(s: *State) *State {
     // Is it a rune?  #foo
     switch (s.peek()) {
         'a'...'z', 'A'...'Z' => return handleRune(s),
+        else => {},
+    }
+
+    // Is it a datum label / reference?
+    switch (s.peek()) {
+        '0'...'9' => return handleDatumLabel(s),
         else => {},
     }
 
@@ -475,23 +513,7 @@ fn handleRune(s: *State) *State {
 }
 
 fn readRune(s: *State) ?Value {
-    var buf: [6]u8 = undefined;
-    var i: u8 = 0;
-    while (!s.eof()) : (i += 1) switch (s.peek()) {
-        'a'...'z', 'A'...'Z' => {
-            if (i == buf.len) {
-                return null;
-            }
-            buf[i] = s.getc();
-        },
-        else => break,
-    };
-
-    // 'i' can't be 0 since this function is only called if at least one ASCII
-    // letter was seen after the hash.
-    std.debug.assert(i != 0);
-
-    return value.rune.pack(buf[0..i]);
+    return readShortString(s, std.ascii.isAlphanumeric, value.rune.pack);
 }
 
 fn isEndOfRune(s: *State) bool {
@@ -503,6 +525,39 @@ fn isEndOfRune(s: *State) bool {
 
 fn endRuneDatum(s: *State) *State {
     return s.returnDatum(value.pair.cons(s.context, s.retval));
+}
+
+fn handleDatumLabel(s: *State) *State {
+    const n = readDatumLabel(s) orelse return err(s, "datum label too long");
+    //
+    // We're at the end of the numeric label now; possibilities are:
+    //
+    //   #n#|
+    //
+    //   #n#|=DATUM
+    //
+
+    if (s.eof() or s.isWhitespace()) {
+        const rune = value.rune.pack("LABEL");
+        return s.returnDatum(value.pair.cons(rune, n));
+    }
+
+    if (s.getc() != '=') {
+        return err(s, "invalid character after numeric datum label");
+    }
+
+    s.context = n;
+    return s.recurParse(.start_datum, .end_datum_label);
+}
+
+fn readDatumLabel(s: *State) ?Value {
+    return readShortString(s, std.ascii.isDigit, value.sstr.pack);
+}
+
+fn endDatumLabel(s: *State) *State {
+    const rune = value.rune.pack("LABEL");
+    const payload = value.pair.cons(s.context, s.retval);
+    return s.returnDatum(value.pair.cons(rune, payload));
 }
 
 fn endHashDatum(s: *State) *State {
@@ -566,33 +621,22 @@ fn startBareString(s: *State) *State {
 }
 
 fn readBareSstr(s: *State) ?*State {
-    // We will reset to this position if we fail.
-    const start_pos = s.pos();
-
-    var buf: [6]u8 = undefined;
-    var i: u8 = 0;
-    while (!s.eof()) : (i += 1) {
-        if (isBareStringEnd(s)) {
-            break;
-        }
-        if (i == buf.len) {
-            // failed; reset and bail out
-            s.resetPos(start_pos);
-            return null;
-        }
-        buf[i] = s.getc();
+    const sp = s.pos();
+    if (readShortString(s, isSstrChar, value.sstr.pack)) |sstr| {
+        return s.returnDatum(sstr);
+    } else {
+        s.resetPos(sp);
+        return null;
     }
-
-    return s.returnDatum(value.sstr.pack(buf[0..i]));
 }
 
-fn isBareStringEnd(s: *State) bool {
+fn isSstrChar(c: u8) bool {
     // We will ignore illegal characters here, because they aren't consumed by
     // this function; whatever code comes next must handle them.
-    return s.eof() or switch (s.peek()) {
-        0...32, 127...255 => true,
-        '(', ')', '[', ']', '{', '}', ';', '#', '"', '\'', '`', ',' => true,
-        else => false,
+    return switch (c) {
+        '(', ')', '[', ']', '{', '}', ';', '#', '"', '\'', '`', ',' => false,
+        0...32, 127...255 => false,
+        else => true,
     };
 }
 
