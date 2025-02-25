@@ -16,12 +16,12 @@ pub fn assert(v: Value) void {
 }
 
 pub fn pack(c: u21) Value {
-    return .{ .char = .{ .char = c } };
+    return .{ .char = .{ .value = c } };
 }
 
 pub fn unpack(v: Value) u21 {
     assert(v);
-    return @truncate(v.char.char);
+    return @truncate(v.char.value);
 }
 
 // Zisp API

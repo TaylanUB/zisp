@@ -2,6 +2,7 @@ const std = @import("std");
 
 const value = @import("../value.zig");
 
+const ShortString = value.ShortString;
 const Value = value.Value;
 
 // Zig API
@@ -48,12 +49,16 @@ pub fn pack(s: []const u8) Value {
     return v;
 }
 
-pub fn unpack(v: Value) struct { [6]u8, u3 } {
-    const s: [6]u8 = @bitCast(v.rune.name);
+pub fn unpack(v: Value) ShortString {
+    var s = ShortString{ .buffer = @bitCast(v.sstr.string) };
     inline for (0..6) |i| {
-        if (s[i] == 0) return .{ s, i };
+        if (s.buffer[i] == 0) {
+            s.len = i;
+            return s;
+        }
     }
-    return .{ s, 6 };
+    s.len = 6;
+    return s;
 }
 
 // Zisp API

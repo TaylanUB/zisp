@@ -32,45 +32,66 @@
 // switching between modes.
 //
 // When the code parser encounters syntax sugar, it always transforms it into a
-// list starting with a rune, like in the following examples:
+// list starting with a rune.  The list of all such transformations follows.
 //
-//   #(...)   -> (#HASH ...)
+//   #datum  -> (#HASH . datum)        #name(...)  -> (#name ...)
 //
-//   [...]    -> (#SQUARE ...)
+//   [...]   -> (#SQUARE ...)          dat1dat2    -> (#JOIN dat1 . dat2)
 //
-//   'foo     -> (#QUOTE . foo)
+//   {...}   -> (#BRACE ...)           dat1.dat2   -> (#DOT dat1 . dat2)
 //
-// These can combine arbitrarily:
+//   'datum  -> (#QUOTE . datum)       #n#=datum   -> (#LABEL n . datum)
 //
-//   #{...}   -> (#HASH #BRACE ...)
+//   `datum  -> (#GRAVE . datum)       #n#         -> (#LABEL . n)
 //
-//   #'foo    -> (#HASH #QUOTE . foo)
+//   ,datum  -> (#COMMA . datum)
 //
-//   ##'[...] -> (#HASH #HASH #QUOTE #SQUARE ...)
+// (The "#datum" form refers to expressions that cannot be mistaken for a rune,
+// such as for example: #(...) or #"..." etc.)
 //
-// As a specialty, double-quoted strings are actually considered sugar by the
-// code parser, and are transformed as follows into data:
+// The terms "datum", "dat1", and "dat2" refer to an arbitrary datum; "name" is
+// a rune name; ellipsis mean zero or more data; "n" is a non-negative integer.
 //
-//   "..."    -> (#STRING . "...")
+// Though not represented in the table above due to notational difficulty, the
+// format "#name(...)" doesn't require a list in the second position; any datum
+// works, so long as there's no ambiguity:
 //
-// (Otherwise, all string literals would be identifiers, or all identifiers
-// would be string literals, because Zisp doesn't differentiate strings and
-// symbols like traditional lisps.  Also, note that although we could reuse
-// #QUOTE here, instead of using #STRING, this would make it impossible to
-// differentiate between the code expressions #'foo and #"foo".)
+//   #name1#name2  -> (#name1 . #name2)
+//
+//   #name"text"   -> (#name . "text")
+//
+// As a counter-example, following a rune immediately with a bare string is not
+// possible, since it's ambiguous:
+//
+//   #abcdefgh  ;Could be (#abcdef . gh) or (#abcde . fgh) or ...
+//
+// The parser will see this as an attempt to use an 8-letter rune name, and
+// raise an error, since rune names are limited to 6 characters.
+//
+// Syntax sugar can combine arbitrarily:
+//
+//   #{...}            -> (#HASH #BRACE ...)
+//
+//   #'foo             -> (#HASH #QUOTE . foo)
+//
+//   ##'[...]          -> (#HASH #HASH #QUOTE #SQUARE ...)
+//
+//   {x y}[i j]        -> (#JOIN (#BRACE x y) #SQUARE i j)
+//
+//   foo.bar.baz{x y}  -> (#JOIN (#DOT (#DOT foo . bar) . baz) #BRACE x y)
 //
 // Runes are case-sensitive, and the code parser only emits runes using
 // upper-case letters, so lower-case runes are free for user extensions.
+// Exceptions are runes used directly in code, like #true and #false.
+//
+// Although strings and symbols aren't disjoint types in Zisp, the parser flags
+// double-quoted string literals to allow distinguishing them from bare strings.
+// Otherwise, it would not be possible for the compiler to tell the difference
+// between an identifier and a string literal.
 //
 // You may be wondering about numbers.  As far as the parser is concerned,
 // numbers are strings.  It's the decoder (see below) that will turn bare
-// strings (those not marked with #STRING) into numbers where appropriate.
-//
-// Datum labels are also handled by the decoder; they desugar like so:
-//
-//   #n#       -> (#LABEL . n)
-//
-//   #n#=DATUM -> (#LABEL n . DATUM)
+// strings into numbers where appropriate.
 //
 // Note that 'foo becomes (quote foo) in Scheme, but (#QUOTE . foo) in Zisp.
 // The operand of #QUOTE is the entire cdr.  The same principle is used when
@@ -84,6 +105,8 @@
 //
 //   #{x}     -> (#HASH (#BRACE (x)))       #{x}     -> (#HASH #BRACE x)
 //
+//   foo(x y) -> (#JOIN foo (x y))          foo(bar) -> (#JOIN foo x y)
+//
 //
 // === Decoder ===
 //
@@ -94,11 +117,12 @@
 // expect a vector literal like #(...) to work in Scheme.
 //
 // Runes may be decoded in isolation as well, rather than transforming a list
-// whose head they appear in.  This is how #true and #false are implemented.
+// whose head they appear in.  This can implement #true and #false.  (These
+// would be used verbatim in code, rather than emitted by the parser.)
 //
 // The decoder may also perform arbitrary transforms on any type; for example,
-// it may turn bare strings (those not marked with #STRING) into numbers when
-// it's decoding data representing code.  This is how number literals are
+// it may turn bare strings (those not flagged as double-quoted) into numbers
+// when it's decoding data representing code.  This is how number literals are
 // implemented in Zisp.
 //
 // The decoder recognizes (#QUOTE ...) to implement the traditional quoting
@@ -217,7 +241,7 @@ const Value = value.Value;
 pub const Mode = enum { code, data };
 
 const TopState = struct {
-    alloc: std.heap.MemoryPool(State),
+    alloc: std.mem.Allocator,
     input: []const u8,
     pos: usize = 0,
     mode: Mode = undefined,
@@ -295,10 +319,6 @@ const State = struct {
         };
     }
 
-    fn isFinalNull(s: *State) bool {
-        return s.peek() == 0 and s.top.pos == s.top.input.len - 1;
-    }
-
     fn recurParse(s: *State, start_from: Fn, return_to: Fn) *State {
         const newState = s.top.alloc.create(State) catch @panic("OOM");
         newState.* = .{
@@ -349,9 +369,10 @@ fn readShortString(
 const Fn = enum {
     start_parse,
     start_datum,
+    end_dotted_datum,
+    end_joined_datum,
     end_datum_label,
     end_hash_datum,
-    end_rune_datum,
     end_quote,
     continue_list,
     finish_improper_list,
@@ -367,17 +388,18 @@ pub fn parse(input: []const u8, mode: Mode) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer if (gpa.deinit() == .leak) @panic("leak");
     const alloc = gpa.allocator();
-    var pool: std.heap.MemoryPool(State) = .init(alloc);
-    defer pool.deinit();
-    var top = TopState{ .alloc = pool, .input = input, .mode = mode };
+    // var pool: std.heap.MemoryPool(State) = .init(alloc);
+    // defer pool.deinit();
+    var top = TopState{ .alloc = alloc, .input = input, .mode = mode };
     var s0 = State{ .top = &top };
     var s = &s0;
     while (true) s = switch (s.next) {
         .start_parse => startParse(s),
         .start_datum => startDatum(s),
+        .end_dotted_datum => endDottedDatum(s),
+        .end_joined_datum => endJoinedDatum(s),
         .end_datum_label => endDatumLabel(s),
         .end_hash_datum => endHashDatum(s),
-        .end_rune_datum => endRuneDatum(s),
         .end_quote => endQuote(s),
         .continue_list => continueList(s),
         .finish_improper_list => finishImproperList(s),
@@ -424,14 +446,59 @@ fn startDatum(s: *State) *State {
 
         '(', '[', '{' => startList(s),
 
-        // Periods are only allowed in the middle of a string, or to express
-        // improper lists, because the following look too much like typos:
-        //
-        //   (foo. bar)  (foo .bar)  (123. 456)  (123 .456)
-        //
         '.' => err(s, "misplaced period"),
 
         else => startBareString(s),
+    };
+}
+
+fn endDatum(s: *State, d: Value) *State {
+    //
+    // We're at the end of a datum; check for dot and join notations:
+    //
+    //   DATUM|.DATUM2
+    //
+    //   DATUM|DATUM2
+    //
+
+    if (isEndOfDatum(s)) {
+        // Nope, end it.
+        return s.returnDatum(d);
+    }
+
+    // These are only allowed in code mode.
+    if (s.mode() == .data) {
+        return err(s, "invalid use of hash in data mode");
+    }
+
+    s.context = d;
+
+    if (s.peek() == '.') {
+        s.skip();
+        return s.recurParse(.start_datum, .end_dotted_datum);
+    }
+
+    return s.recurParse(.start_datum, .end_joined_datum);
+}
+
+fn endDottedDatum(s: *State) *State {
+    const rune = value.rune.pack("DOT");
+    const first = s.context;
+    const second = s.retval;
+    return endDatum(s, value.pair.cons(rune, value.pair.cons(first, second)));
+}
+
+fn endJoinedDatum(s: *State) *State {
+    const rune = value.rune.pack("JOIN");
+    const first = s.context;
+    const second = s.retval;
+    return endDatum(s, value.pair.cons(rune, value.pair.cons(first, second)));
+}
+
+fn isEndOfDatum(s: *State) bool {
+    return s.eof() or switch (s.peek()) {
+        '\t', '\n', ' ', ';', ')', ']', '}' => true,
+        else => false,
     };
 }
 
@@ -496,35 +563,18 @@ fn handleRune(s: *State) *State {
     //   #foo|(...)
     //
 
-    if (isEndOfRune(s)) {
+    if (isEndOfDatum(s)) {
         // Nope, just a stand-alone rune.
         return s.returnDatum(rune);
     }
 
     // Otherwise, it's followed by a datum, like: #foo(...)
 
-    // Which is only allowed in code mode.
-    if (s.mode() == .data) {
-        return err(s, "invalid use of hash in data mode");
-    }
-
-    s.context = rune;
-    return s.recurParse(.start_datum, .end_rune_datum);
+    return endDatum(s, rune);
 }
 
 fn readRune(s: *State) ?Value {
     return readShortString(s, std.ascii.isAlphanumeric, value.rune.pack);
-}
-
-fn isEndOfRune(s: *State) bool {
-    return s.eof() or switch (s.peek()) {
-        '\t', '\n', ' ', ')', ']', '}' => true,
-        else => false,
-    };
-}
-
-fn endRuneDatum(s: *State) *State {
-    return s.returnDatum(value.pair.cons(s.context, s.retval));
 }
 
 fn handleDatumLabel(s: *State) *State {
@@ -532,10 +582,17 @@ fn handleDatumLabel(s: *State) *State {
     //
     // We're at the end of the numeric label now; possibilities are:
     //
-    //   #n#|
+    //   #n|#
     //
-    //   #n#|=DATUM
+    //   #n|#=DATUM
     //
+
+    if (s.eof()) {
+        return err(s, "unexpected EOF while reading datum label");
+    }
+    if (s.getc() != '#') {
+        return err(s, "invalid character while reading datum label");
+    }
 
     if (s.eof() or s.isWhitespace()) {
         const rune = value.rune.pack("LABEL");
@@ -570,14 +627,7 @@ fn startQuotedString(s: *State) *State {
     s.skip();
 
     const str = readQuotedString(s) catch return err(s, "unclosed string");
-    if (s.mode() == .code) {
-        // "foo bar" => (#STRING . "foo bar")
-        const rune = value.rune.pack("STRING");
-        const pair = value.pair.cons(rune, str);
-        return s.returnDatum(pair);
-    } else {
-        return s.returnDatum(str);
-    }
+    return s.returnDatum(str);
 }
 
 // RQS = Read Quoted String
@@ -588,16 +638,16 @@ fn readQuotedString(s: *State) !Value {
 }
 
 fn readQuotedSstr(s: *State) !?Value {
-    // We will reset to this position if we fail.
     const start_pos = s.pos();
 
+    // TODO: Handle escapes.
     var buf: [6]u8 = undefined;
     var i: u8 = 0;
     while (!s.eof()) {
         const c = s.getc();
         if (c == '"') {
             // ok, return what we accumulated
-            return value.sstr.pack(buf[0..i]);
+            return value.sstr.packLiteral(buf[0..i]);
         }
         if (i == 6) {
             // failed; reset and bail out

@@ -87,41 +87,45 @@
 //
 // This 51-bit range is divided as follows, based on the high bits:
 //
-//   000   :: Runes
+//   000   :: Rune
 //
 //   001   :: Short string
 //
-//   010   :: Unicode code point
+//   010   :: Short string literal
 //
-//   011   :: Singleton values
+//   011   :: Unicode code point
 //
-//   1..   :: Undefined
+//   100   :: Singleton values
 //
-// Runes are symbols of 1 to 6 ASCII letters, used to implement reader syntax;
-// both built-in and extensions.
+//   101, 110, 111  :: Undefined
+//
+// Runes are symbols of 1 to 6 ASCII characters used to implement reader syntax.
 //
 // Zisp strings are immutable.  Any string fitting into 6 bytes or less will be
 // stored as an immediate value, not requiring any heap allocation or interning.
 // It's implicitly interned, so to speak.  This includes the empty string.
 //
-// The null byte serves as a terminator and cannot appear in these strings; a
-// string that short but actually containing a null byte will need to be heap
-// allocated like other strings.
+// The null byte serves as a terminator for strings shorter than 6 bytes, and
+// therefore cannot appear in these strings; a string that short but actually
+// containing a null byte will need to be heap allocated like other strings.
 //
-// There may also be uninterned strings on the heap that are also as short but
-// ended up on the heap due to being uninterned.  Calling intern on them will
-// return the equivalent short string as an immediate.
+// There may also be strings that are this short, but ended up on the heap due
+// to being uninterned.  Interning them will return the equivalent short string
+// as an immediate.
+//
+// The separate type for a short string *literal* is for an efficiency hack in
+// the parser; see commentary there.
 //
 // Unicode code points need a maximum of 21 bits, yet we have 48 available.
 // This may be exploited for a future extension.
 //
-// Similarly, it's extremely unlikely that we will ever need more than a few
-// dozen singleton values (false, true, null, and so on).  As such, this range
-// of bit patterns may be subdivided in the future.  Right now, only the lowest
-// 8 bits are allowed to be set, with the other 40 being reserved, so there's a
-// limit of 256 singleton values that can be defined.
+// Similarly, it's very unlikely that we will ever need more than a handful of
+// singleton values (false, true, nil, and so on).  As such, this range of bit
+// patterns may be subdivided in the future.  Right now, only the lowest 8 bits
+// are allowed to be set, with the other 40 being reserved, so there's a limit
+// of 256 singleton values that can be defined.
 //
-// And on top of all that we still have a 50-bit range left!
+// And top of that, we have three more 48-bit value ranges that are unused!
 //
 // The forbidden value 4, Positive Infinity, would be the "empty string rune"
 // but that isn't allowed anyway, so all is fine.
@@ -160,6 +164,8 @@ const FILL = 0x7ff;
 
 // Used when dealing with runes and short strings.
 pub const ShortString = std.BoundedArray(u8, 6);
+
+pub const OtherTag = enum(u3) { rune, sstr, sstr_lit, char, misc };
 
 /// Represents a Zisp value/object.
 pub const Value = packed union {
@@ -242,7 +248,7 @@ pub const Value = packed union {
     sstr: packed struct {
         // actually [6]u8 but packed struct cannot contain arrays
         string: u48,
-        _tag: OtherTag = .sstr,
+        tag: OtherTag,
         _is_ptr: bool = false,
         _: u11 = FILL,
         _is_fixnum: bool = false,
@@ -250,7 +256,7 @@ pub const Value = packed union {
 
     /// For initializing and reading characters.
     char: packed struct {
-        char: u21,
+        value: u21,
         _reserved: u27 = 0,
         _tag: OtherTag = .char,
         _is_ptr: bool = false,
@@ -267,8 +273,6 @@ pub const Value = packed union {
         _: u11 = FILL,
         _is_fixnum: bool = false,
     },
-
-    const OtherTag = enum(u3) { rune, sstr, char, misc };
 
     const Self = @This();
 

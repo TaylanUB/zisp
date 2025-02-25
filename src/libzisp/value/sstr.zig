@@ -1,11 +1,15 @@
 const std = @import("std");
 
-const Value = @import("../value.zig").Value;
+const value = @import("../value.zig");
+
+const ShortString = value.ShortString;
+const OtherTag = value.OtherTag;
+const Value = value.Value;
 
 // Zig API
 
 pub fn check(v: Value) bool {
-    return v.isOther(.sstr);
+    return v.isOther(.sstr) or v.isOther(.sstr_lit);
 }
 
 pub fn assert(v: Value) void {
@@ -43,8 +47,16 @@ fn assertValidSstr(s: []const u8) void {
 // Note: rune.zig uses equivalent code; probably good to keep in sync.
 
 pub fn pack(s: []const u8) Value {
+    return _pack(s, .sstr);
+}
+
+pub fn packLiteral(s: []const u8) Value {
+    return _pack(s, .sstr_lit);
+}
+
+fn _pack(s: []const u8, tag: OtherTag) Value {
     assertValidSstr(s);
-    var v = Value{ .sstr = .{ .string = 0 } };
+    var v = Value{ .sstr = .{ .string = 0, .tag = tag } };
     const dest: [*]u8 = @ptrCast(&v.sstr.string);
     @memcpy(dest, s);
     return v;
@@ -55,6 +67,15 @@ pub fn unpack(v: Value) struct { [6]u8, u3 } {
     const s: [6]u8 = @bitCast(v.sstr.string);
     inline for (0..6) |i| {
         if (s[i] == 0) return .{ s, i };
+    }
+    return .{ s, 6 };
+}
+
+pub fn unpack1(v: Value) struct { [6]u8, u3 } {
+    assert(v);
+    const s: [6]u8 = @bitCast(v.sstr.string);
+    for (0..6) |i| {
+        if (s[i] == 0) return .{ s, @intCast(i) };
     }
     return .{ s, 6 };
 }
