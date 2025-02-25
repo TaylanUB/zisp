@@ -247,7 +247,7 @@ test "pair" {
 }
 
 test "parse" {
-    const val = io.parser.parseCode("\"foo\"");
+    const val = io.parser.parse("\"foo\"");
 
     try std.testing.expect(value.sstr.check(val));
 
@@ -256,7 +256,7 @@ test "parse" {
 }
 
 test "parse2" {
-    const val = io.parser.parseCode(
+    const val = io.parser.parse(
         \\ ;; Testing some crazy datum comments
         \\ ##;"bar"#;([x #"y"]{##`,'z})"foo"
         \\ ;; end
@@ -273,7 +273,7 @@ test "parse2" {
 }
 
 test "parse3" {
-    const val = io.parser.parseCode(
+    const val = io.parser.parse(
         \\(foo #;x #;(x y) #;x #bar [#x #"baz"] 'bat)
     );
 
@@ -289,7 +289,7 @@ test "parse3" {
 }
 
 test "parse4" {
-    const val = io.parser.parseCode("(foo . #;x bar #;y)");
+    const val = io.parser.parse("(foo . #;x bar #;y)");
 
     const s = value.sstr.unpack(value.pair.car(val));
     try std.testing.expectEqualStrings("foo", s.slice());
@@ -301,6 +301,6 @@ test "parse4" {
 test "unparse" {
     try std.testing.expectEqualStrings(
         "#foo",
-        io.unparser.unparse(io.parser.parseCode("#foo")),
+        io.unparser.unparse(io.parser.parse("#foo")),
     );
 }

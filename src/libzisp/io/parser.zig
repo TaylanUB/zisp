@@ -1,21 +1,14 @@
 //
 // === Parser for Code & Data ===
 //
-// Zisp s-expressions come in two flavors: code (sugar) and data (no sugar).
+// Zisp s-expressions are defined in terms of an extremely minimal set of data
+// types; only that which is necessary to build representations of more complex
+// expressions and types:
 //
-// However, code expressions are parsed into the same data types which the data
-// expressions can represent, so homoiconicity is preserved.
+//   type      format/examples    comment
+//   ----      ---------------    -------
 //
-// The "sugar" used in code expressions is merely shorthand for more complex
-// data expressions, which could have been written by hand.
-//
-// Data expressions have a very simple format, and are only able to express the
-// bare minimum set of data types needed to represent more complex data:
-//
-//   type      format             comment
-//   ----      ------             -------
-//
-//   string    foo , "foo bar"    symbols and strings are the same data type
+//   string    foo , "foo bar"    quoted strings are flagged as such
 //
 //   rune      #name              name is: [a-zA-Z][a-zA-Z0-9]{0,5}
 //
@@ -23,52 +16,59 @@
 //
 //   nil       ()                 we prefer the term nil over null
 //
-// The list short-hand syntax is the only "syntax sugar" supported in data:
+// The parser recognizes various "syntax sugar" and transforms uses of it into
+// uses of the above types.
 //
-//   (DATUM DATUM DATUM)  ->  (DATUM . (DATUM . (DATUM . ())))
+// The most ubiquitous example is of course the list syntax:
 //
-// We may use terms like "code parser" and "data parser" out of convenience,
-// although there may only be a single parser that implements both formats by
-// switching between modes.
+//   (datum1 datum2 ...)  ->  (datum1 . (datum2 . (... . ())))
 //
-// When the code parser encounters syntax sugar, it always transforms it into a
-// list starting with a rune.  The list of all such transformations follows.
+// The following table summarizes the other supported transformations:
 //
-//   #datum  -> (#HASH . datum)        #name(...)  -> (#name ...)
+//   [...]   -> (#SQUARE ...)          #datum      -> (#HASH . datum)
 //
-//   [...]   -> (#SQUARE ...)          dat1dat2    -> (#JOIN dat1 . dat2)
+//   {...}   -> (#BRACE ...)           #rune(...)  -> (#rune ...)
 //
-//   {...}   -> (#BRACE ...)           dat1.dat2   -> (#DOT dat1 . dat2)
+//   #<...>  -> (#ANGLE ...)           dat1dat2    -> (#JOIN dat1 . dat2)
 //
-//   'datum  -> (#QUOTE . datum)       #n#=datum   -> (#LABEL n . datum)
+//   'datum  -> (#QUOTE . datum)       dat1.dat2   -> (#DOT dat1 . dat2)
 //
-//   `datum  -> (#GRAVE . datum)       #n#         -> (#LABEL . n)
+//   `datum  -> (#GRAVE . datum)       #n#=datum   -> (#LABEL n . datum)
 //
-//   ,datum  -> (#COMMA . datum)
+//   ,datum  -> (#COMMA . datum)       #n#         -> (#LABEL . n)
 //
-// (The "#datum" form refers to expressions that cannot be mistaken for a rune,
-// such as for example: #(...) or #"..." etc.)
+// Notes:
 //
-// The terms "datum", "dat1", and "dat2" refer to an arbitrary datum; "name" is
-// a rune name; ellipsis mean zero or more data; "n" is a non-negative integer.
+// * The terms datum, dat1, and dat2 each refer to an arbitrary datum; ellipsis
+//   means zero or more data; n is a non-negative integer.
 //
-// Though not represented in the table above due to notational difficulty, the
-// format "#name(...)" doesn't require a list in the second position; any datum
-// works, so long as there's no ambiguity:
+// * The #datum form applies only to expressions that cannot be mistaken for a
+//   rune, such as for example: #(...) or #"..." or #'string etc.; following a
+//   hash sign with a plain string would otherwise be parsed as a rune.
 //
-//   #name1#name2  -> (#name1 . #name2)
+// * Though not represented in the table due to notational difficulty, the
+//   format "#rune(...)" doesn't require a list in the second position; any
+//   datum works, so long as there's no ambiguity; for example:
 //
-//   #name"text"   -> (#name . "text")
+//     #rune1#rune2  -> (#rune1 . #rune2)
 //
-// As a counter-example, following a rune immediately with a bare string is not
-// possible, since it's ambiguous:
+//     #rune"text"   -> (#rune . "text")
 //
-//   #abcdefgh  ;Could be (#abcdef . gh) or (#abcde . fgh) or ...
+//     #rune'string  -> (#rune #QUOTE . string)
 //
-// The parser will see this as an attempt to use an 8-letter rune name, and
-// raise an error, since rune names are limited to 6 characters.
+//   As a counter-example, following a rune immediately with a bare string is
+//   not possible, since it's ambiguous:
 //
-// Syntax sugar can combine arbitrarily:
+//     #abcdefgh  ;Could be (#abcdef . gh) or (#abcde . fgh) or ...
+//
+//   The parser will see this as an attempt to use an 8-letter rune name, and
+//   raise an error, since rune names are limited to 6 characters.
+//
+// * The #<...> form is a special case; the less-than and greater-than symbols
+//   are not otherwise treated as brackets; e.g., <a b c d> is actually four
+//   strings: "<a", "b", "c", "d>".
+//
+// Syntax sugar can combine arbitrarily; some examples follow:
 //
 //   #{...}            -> (#HASH #BRACE ...)
 //
@@ -80,9 +80,9 @@
 //
 //   foo.bar.baz{x y}  -> (#JOIN (#DOT (#DOT foo . bar) . baz) #BRACE x y)
 //
-// Runes are case-sensitive, and the code parser only emits runes using
-// upper-case letters, so lower-case runes are free for user extensions.
-// Exceptions are runes used directly in code, like #true and #false.
+// Runes are case-sensitive, and the parser only emits runes using upper-case
+// letters when expressing syntax sugar, so there can be no accidental clash
+// with runes that appear verbatim in code.
 //
 // Although strings and symbols aren't disjoint types in Zisp, the parser flags
 // double-quoted string literals to allow distinguishing them from bare strings.
@@ -95,7 +95,7 @@
 //
 // Note that 'foo becomes (quote foo) in Scheme, but (#QUOTE . foo) in Zisp.
 // The operand of #QUOTE is the entire cdr.  The same principle is used when
-// parsing other sugar:
+// parsing other sugar; some examples follow:
 //
 //          Incorrect                              Correct
 //
@@ -117,13 +117,11 @@
 // expect a vector literal like #(...) to work in Scheme.
 //
 // Runes may be decoded in isolation as well, rather than transforming a list
-// whose head they appear in.  This can implement #true and #false.  (These
-// would be used verbatim in code, rather than emitted by the parser.)
+// whose head they appear in.  This can implement #true and #false.
 //
 // The decoder may also perform arbitrary transforms on any type; for example,
 // it may turn bare strings (those not flagged as double-quoted) into numbers
-// when it's decoding data representing code.  This is how number literals are
-// implemented in Zisp.
+// when appropriate.  This is how number literals are implemented.
 //
 // The decoder recognizes (#QUOTE ...) to implement the traditional quoting
 // mechanism, but with a significant difference:
@@ -238,13 +236,10 @@ const value = @import("../value.zig");
 const ShortString = value.ShortString;
 const Value = value.Value;
 
-pub const Mode = enum { code, data };
-
 const TopState = struct {
     alloc: std.mem.Allocator,
     input: []const u8,
     pos: usize = 0,
-    mode: Mode = undefined,
 };
 
 const State = struct {
@@ -259,10 +254,6 @@ const State = struct {
 
     // To remember what kind of list we're in: () [] {}
     opening_bracket: u8 = undefined,
-
-    fn mode(s: *State) Mode {
-        return s.top.mode;
-    }
 
     fn eof(s: *State) bool {
         return s.top.pos >= s.top.input.len;
@@ -380,17 +371,13 @@ const Fn = enum {
     perform_return,
 };
 
-pub fn parseCode(input: []const u8) Value {
-    return parse(input, .code);
-}
-
-pub fn parse(input: []const u8, mode: Mode) Value {
+pub fn parse(input: []const u8) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer if (gpa.deinit() == .leak) @panic("leak");
     const alloc = gpa.allocator();
     // var pool: std.heap.MemoryPool(State) = .init(alloc);
     // defer pool.deinit();
-    var top = TopState{ .alloc = alloc, .input = input, .mode = mode };
+    var top = TopState{ .alloc = alloc, .input = input };
     var s0 = State{ .top = &top };
     var s = &s0;
     while (true) s = switch (s.next) {
@@ -466,11 +453,6 @@ fn endDatum(s: *State, d: Value) *State {
         return s.returnDatum(d);
     }
 
-    // These are only allowed in code mode.
-    if (s.mode() == .data) {
-        return err(s, "invalid use of hash in data mode");
-    }
-
     s.context = d;
 
     if (s.peek() == '.') {
@@ -515,7 +497,7 @@ fn handleHash(s: *State) *State {
     //
     //   #|;DATUM    ;datum comment
     //
-    //   #|DATUM     ;hash-datum (code mode only)
+    //   #|DATUM     ;hash-datum
     //
 
     if (s.eof()) {
@@ -547,30 +529,12 @@ fn handleHash(s: *State) *State {
 
     // Otherwise, it must be a hash-datum.  #DATUM
 
-    // But data mode doesn't allow that.
-    if (s.mode() == .data) {
-        return err(s, "use of hash-datum sequence not allowed in data mode");
-    }
-
     return s.recurParse(.start_datum, .end_hash_datum);
 }
 
 fn handleRune(s: *State) *State {
-    const rune = readRune(s) orelse return err(s, "rune too long");
-    //
-    // Now we're at the end of the rune, but it could be a rune-datum:
-    //
-    //   #foo|(...)
-    //
-
-    if (isEndOfDatum(s)) {
-        // Nope, just a stand-alone rune.
-        return s.returnDatum(rune);
-    }
-
-    // Otherwise, it's followed by a datum, like: #foo(...)
-
-    return endDatum(s, rune);
+    const r = readRune(s) orelse return err(s, "rune too long");
+    return endDatum(s, r);
 }
 
 fn readRune(s: *State) ?Value {
@@ -718,10 +682,6 @@ fn endQuote(s: *State) *State {
 
 fn startList(s: *State) *State {
     const open = s.getc();
-
-    if (s.mode() == .data and open != '(') {
-        return err(s, "invalid opening bracket in data mode");
-    }
 
     s.consumeBlanks();
     if (s.eof()) {
