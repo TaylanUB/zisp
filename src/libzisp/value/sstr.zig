@@ -62,22 +62,13 @@ fn _pack(s: []const u8, tag: OtherTag) Value {
     return v;
 }
 
-pub fn unpack(v: Value) struct { [6]u8, u3 } {
+pub fn unpack(v: Value) ShortString {
     assert(v);
     const s: [6]u8 = @bitCast(v.sstr.string);
     inline for (0..6) |i| {
-        if (s[i] == 0) return .{ s, i };
+        if (s[i] == 0) return .{ .buffer = s, .len = i };
     }
-    return .{ s, 6 };
-}
-
-pub fn unpack1(v: Value) struct { [6]u8, u3 } {
-    assert(v);
-    const s: [6]u8 = @bitCast(v.sstr.string);
-    for (0..6) |i| {
-        if (s[i] == 0) return .{ s, @intCast(i) };
-    }
-    return .{ s, 6 };
+    return .{ .buffer = s, .len = 6 };
 }
 
 // No Zisp API for sstr specifically, since it's a string.  See string.zig.
