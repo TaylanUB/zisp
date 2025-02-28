@@ -298,6 +298,18 @@ test "parse4" {
     try std.testing.expectEqualStrings("bar", f.slice());
 }
 
+test "parse bench" {
+    var timer = try std.time.Timer.start();
+    std.mem.doNotOptimizeAway(timer.lap());
+    for (0..1000) |i| {
+        _ = i;
+        std.mem.doNotOptimizeAway(io.parser.parse("(a b c (x y z (a b c (x y z (a b c (x y z (a b c (x y z (a b c (x y z (a b c (x y z (a b c (x y z) d e f) d e f) d e f) d e f) d e f) d e f) d e f) d e f) d e f) d e f) d e f) 1 2 3))"));
+    }
+    const ns: f64 = @floatFromInt(timer.lap());
+    const secs = ns / 1_000_000_000;
+    std.debug.print("parse: {d:.3}s\n", .{secs});
+}
+
 test "unparse" {
     const unparse = io.unparser.unparse;
 
