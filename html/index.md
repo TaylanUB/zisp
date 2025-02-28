@@ -6,9 +6,17 @@ been invented today, and had it been designed with pragmatic use as a
 primary concern in its design.
 
 This language doesn't actually exist yet.  You are merely reading the
-ramblings of a madman.
+ramblings of a madman.  A little bit of code is here already though:
 
-* [Compilation is execution](notes/compilation.html)
+[Zisp on GitHub](https://github.com/TaylanUB/zisp/)
+
+Some of the following articles are quite insightful.  Others are VERY
+rambly; you've been warned.
+
+Some are outdated with regards to the actual implementation of Zisp,
+because writing the code often gives you yet another perspective.
+
+* [Compilation is execution](notes/compile.html)
 * [Everything can be serialized](notes/serialize.html)
 * [Symbols are strings](notes/symbols.html)
 * [Stop the "cons" madness!](notes/cons.html)
@@ -22,7 +30,6 @@ ramblings of a madman.
 * [Object-oriented programming](notes/oop.html)
 * [Equality and equivalence semantics](notes/equal.html)
 * [NaN-packing](notes/nan.html)
-
-Temporary source repo before I set up my own git server:
-
-[Zisp on GitHub](https://github.com/TaylanUB/zisp/)
+* [Reader? Decoder? I barely know 'er!](notes/reader.html)
+* [Does the decoder implement macros?](notes/macros.html)
+* [Better syntax-rules?](notes/sr.html)

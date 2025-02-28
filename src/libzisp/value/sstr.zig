@@ -9,7 +9,7 @@ const Value = value.Value;
 // Zig API
 
 pub fn check(v: Value) bool {
-    return v.isOther(.sstr) or v.isOther(.sstr_lit);
+    return v.isOtherTag(.sstr) or v.isOtherTag(.qstr);
 }
 
 pub fn assert(v: Value) void {
@@ -17,6 +17,10 @@ pub fn assert(v: Value) void {
         v.dump();
         @panic("not sstr");
     }
+}
+
+pub fn checkQuoted(v: Value) bool {
+    return v.isOtherTag(.qstr);
 }
 
 // For now, ignore encoding, just treat it as []u8.
@@ -50,8 +54,8 @@ pub fn pack(s: []const u8) Value {
     return _pack(s, .sstr);
 }
 
-pub fn packLiteral(s: []const u8) Value {
-    return _pack(s, .sstr_lit);
+pub fn packQuoted(s: []const u8) Value {
+    return _pack(s, .qstr);
 }
 
 fn _pack(s: []const u8, tag: OtherTag) Value {

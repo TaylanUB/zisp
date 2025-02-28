@@ -1,8 +1,7 @@
 const Value = @import("../value.zig").Value;
-const misc = @import("misc.zig");
 
-pub const f = misc.f;
-pub const t = misc.t;
+pub const f = Value{ .misc = .{ .value = .f } };
+pub const t = Value{ .misc = .{ .value = .t } };
 
 // Zig API
 

@@ -2,7 +2,7 @@ const value = @import("../value.zig");
 
 const Value = value.Value;
 
-pub const nil = @import("misc.zig").nil;
+pub const nil = Value{ .misc = .{ .value = .nil } };
 
 // Zig API
 

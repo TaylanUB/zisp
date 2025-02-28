@@ -5,13 +5,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
-pub const gc = @import("libzisp/gc.zig");
 pub const io = @import("libzisp/io.zig");
 pub const lib = @import("libzisp/lib.zig");
 pub const value = @import("libzisp/value.zig");
 
 pub const ShortString = value.ShortString;
 pub const Value = value.Value;
+pub const Hval = value.Hval;
 
 test "double" {
     const d1: f64 = 0.123456789;
@@ -46,12 +46,12 @@ test "fixnum" {
 test "ptr" {
     const ptr = value.ptr;
 
-    const val: [*]gc.Bucket = @ptrFromInt(256);
-    const tag = ptr.Tag.string;
+    const val: [*]Hval = @ptrFromInt(256);
+    const tag = ptr.Tag.istr;
 
     const p = ptr.pack(val, tag);
     try std.testing.expect(ptr.check(p));
-    try std.testing.expect(ptr.checkZisp(p, tag));
+    try std.testing.expect(ptr.checkZispTag(p, tag));
     try std.testing.expect(ptr.checkStrong(p));
 
     const pv, const pt = ptr.unpack(p);
@@ -60,7 +60,7 @@ test "ptr" {
 
     var w = ptr.makeWeak(p);
     try std.testing.expect(ptr.check(w));
-    try std.testing.expect(ptr.checkZisp(w, tag));
+    try std.testing.expect(ptr.checkZispTag(w, tag));
     try std.testing.expect(ptr.checkWeak(w));
     try std.testing.expectEqual(true, value.boole.unpack(ptr.predWeak(w)));
     try std.testing.expectEqual(false, value.boole.unpack(ptr.predWeakNull(w)));
@@ -258,7 +258,7 @@ test "parse" {
 test "parse2" {
     const val = io.parser.parse(
         \\ ;; Testing some crazy datum comments
-        \\ ##;"bar"#;([x #"y"]{##`,'z})"foo"
+        \\ #;"bar"#;([x #"y"]{##`,'z}) #"foo"
         \\ ;; end
     );
 
@@ -299,8 +299,20 @@ test "parse4" {
 }
 
 test "unparse" {
-    try std.testing.expectEqualStrings(
-        "#foo",
-        io.unparser.unparse(io.parser.parse("#foo")),
+    const unparse = io.unparser.unparse;
+
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var out: std.ArrayList(u8) = .init(gpa.allocator());
+
+    const w = out.writer();
+    const v = io.parser.parse("#foo");
+    try unparse(w, v);
+    try std.testing.expectEqualStrings("#foo", try out.toOwnedSlice());
+}
+
+test "unparse2" {
+    try io.unparser.unparse(
+        std.io.getStdErr().writer(),
+        io.parser.parse("#{foo bar['x]}"),
     );
 }

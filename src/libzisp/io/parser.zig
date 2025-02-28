@@ -25,17 +25,19 @@
 //
 // The following table summarizes the other supported transformations:
 //
-//   [...]   -> (#SQUARE ...)          #datum      -> (#HASH . datum)
+//   #datum  -> (#HASH . datum)        #rune(...)  -> (#rune ...)
 //
-//   {...}   -> (#BRACE ...)           #rune(...)  -> (#rune ...)
+//   [...]   -> (#SQUARE ...)          dat1dat2    -> (#JOIN dat1 . dat2)
 //
-//   #<...>  -> (#ANGLE ...)           dat1dat2    -> (#JOIN dat1 . dat2)
+//   {...}   -> (#BRACE ...)           dat1.dat2   -> (#DOT dat1 . dat2)
 //
-//   'datum  -> (#QUOTE . datum)       dat1.dat2   -> (#DOT dat1 . dat2)
+//   'datum  -> (#QUOTE . datum)       dat1:dat2   -> (#COLON dat1 . dat2)
 //
-//   `datum  -> (#GRAVE . datum)       #n#=datum   -> (#LABEL n . datum)
+//   `datum  -> (#GRAVE . datum)       dat1|dat2   -> (#PIPE dat1 . dat2)
 //
-//   ,datum  -> (#COMMA . datum)       #n#         -> (#LABEL . n)
+//   ,datum  -> (#COMMA . datum)       #n#=datum   -> (#LABEL n . datum)
+//
+//   #n#     -> (#LABEL . n)
 //
 // Notes:
 //
@@ -63,10 +65,6 @@
 //
 //   The parser will see this as an attempt to use an 8-letter rune name, and
 //   raise an error, since rune names are limited to 6 characters.
-//
-// * The #<...> form is a special case; the less-than and greater-than symbols
-//   are not otherwise treated as brackets; e.g., <a b c d> is actually four
-//   strings: "<a", "b", "c", "d>".
 //
 // Syntax sugar can combine arbitrarily; some examples follow:
 //
@@ -105,7 +103,7 @@
 //
 //   #{x}     -> (#HASH (#BRACE (x)))       #{x}     -> (#HASH #BRACE x)
 //
-//   foo(x y) -> (#JOIN foo (x y))          foo(bar) -> (#JOIN foo x y)
+//   foo(x y) -> (#JOIN foo (x y))          foo(x y) -> (#JOIN foo x y)
 //
 //
 // === Decoder ===
@@ -249,11 +247,11 @@ const State = struct {
     parent: ?*State = null,
     retval: Value = undefined,
 
-    // To store accumulated context, such as list elements.
+    // To store a value for context, such as a list of accumulated elements.
     context: Value = undefined,
 
-    // To remember what kind of list we're in: () [] {}
-    opening_bracket: u8 = undefined,
+    // To store a character for context, such as the type of opening bracket.
+    char_context: u8 = undefined,
 
     fn eof(s: *State) bool {
         return s.top.pos >= s.top.input.len;
@@ -264,6 +262,7 @@ const State = struct {
     }
 
     fn skip(s: *State) void {
+        // std.debug.print("{c}\n", .{s.top.input[s.top.pos]});
         s.top.pos += 1;
     }
 
@@ -284,13 +283,10 @@ const State = struct {
     // Consumes whitespace and line comments.
     fn consumeBlanks(s: *State) void {
         while (!s.eof()) {
-            if (s.isWhitespace()) {
-                s.skip();
-            } else if (s.peek() == ';') {
-                s.skip();
-                s.consumeLineComment();
-            } else {
-                return;
+            switch (s.peek()) {
+                '\t', '\n', ' ' => s.skip(),
+                ';' => s.consumeLineComment(),
+                else => return,
             }
         }
     }
@@ -360,11 +356,10 @@ fn readShortString(
 const Fn = enum {
     start_parse,
     start_datum,
-    end_dotted_datum,
-    end_joined_datum,
-    end_datum_label,
+    end_join_datum,
+    end_label_datum,
     end_hash_datum,
-    end_quote,
+    end_quote_datum,
     continue_list,
     finish_improper_list,
     end_improper_list,
@@ -380,19 +375,21 @@ pub fn parse(input: []const u8) Value {
     var top = TopState{ .alloc = alloc, .input = input };
     var s0 = State{ .top = &top };
     var s = &s0;
-    while (true) s = switch (s.next) {
-        .start_parse => startParse(s),
-        .start_datum => startDatum(s),
-        .end_dotted_datum => endDottedDatum(s),
-        .end_joined_datum => endJoinedDatum(s),
-        .end_datum_label => endDatumLabel(s),
-        .end_hash_datum => endHashDatum(s),
-        .end_quote => endQuote(s),
-        .continue_list => continueList(s),
-        .finish_improper_list => finishImproperList(s),
-        .end_improper_list => endImproperList(s),
-        .perform_return => s.performReturn() orelse return s.retval,
-    };
+    while (true) {
+        // std.debug.print("{}\n", .{s.next});
+        s = switch (s.next) {
+            .start_parse => startParse(s),
+            .start_datum => startDatum(s),
+            .end_join_datum => endJoinedDatum(s),
+            .end_label_datum => endLabelDatum(s),
+            .end_hash_datum => endHashDatum(s),
+            .end_quote_datum => endQuoteDatum(s),
+            .continue_list => continueList(s),
+            .finish_improper_list => finishImproperList(s),
+            .end_improper_list => endImproperList(s),
+            .perform_return => s.performReturn() orelse return s.retval,
+        };
+    }
 }
 
 fn startParse(s: *State) *State {
@@ -441,11 +438,8 @@ fn startDatum(s: *State) *State {
 
 fn endDatum(s: *State, d: Value) *State {
     //
-    // We're at the end of a datum; check for dot and join notations:
-    //
-    //   DATUM|.DATUM2
-    //
-    //   DATUM|DATUM2
+    // We're at the end of a datum; check for the various ways data can be
+    // joined together, like DATUM|DATUM or DATUM|.DATUM etc.
     //
 
     if (isEndOfDatum(s)) {
@@ -453,28 +447,32 @@ fn endDatum(s: *State, d: Value) *State {
         return s.returnDatum(d);
     }
 
-    s.context = d;
+    // There's a stupid special-case we have to handle here, where a datum
+    // comment may fool us into thinking there's something to join: foo|#;bar
 
-    if (s.peek() == '.') {
-        s.skip();
-        return s.recurParse(.start_datum, .end_dotted_datum);
+    const c = s.peek();
+    switch (c) {
+        '.', ':', '|' => s.skip(),
+        '#' => if (checkTrailingDatumComment(s)) {
+            return s.returnDatum(d);
+        },
+        else => {},
     }
-
-    return s.recurParse(.start_datum, .end_joined_datum);
+    s.context = d;
+    s.char_context = c;
+    return s.recurParse(.start_datum, .end_join_datum);
 }
 
-fn endDottedDatum(s: *State) *State {
-    const rune = value.rune.pack("DOT");
-    const first = s.context;
-    const second = s.retval;
-    return endDatum(s, value.pair.cons(rune, value.pair.cons(first, second)));
-}
-
-fn endJoinedDatum(s: *State) *State {
-    const rune = value.rune.pack("JOIN");
-    const first = s.context;
-    const second = s.retval;
-    return endDatum(s, value.pair.cons(rune, value.pair.cons(first, second)));
+fn checkTrailingDatumComment(s: *State) bool {
+    const pos = s.pos();
+    s.skip();
+    if (s.eof()) {
+        // Error, but let it be handled later.
+        return false;
+    }
+    const c = s.peek();
+    s.resetPos(pos);
+    return c == ';';
 }
 
 fn isEndOfDatum(s: *State) bool {
@@ -484,20 +482,29 @@ fn isEndOfDatum(s: *State) bool {
     };
 }
 
+fn endJoinedDatum(s: *State) *State {
+    const rune = value.rune.pack(switch (s.char_context) {
+        '.' => "DOT",
+        ':' => "COLON",
+        '|' => "PIPE",
+        else => "JOIN",
+    });
+    const joined = value.pair.cons(s.context, s.retval);
+    return endDatum(s, value.pair.cons(rune, joined));
+}
+
 fn handleHash(s: *State) *State {
     s.skip();
     //
     // We just consumed a hash.  Possibilities include:
     //
-    //   #|foo       ;rune
+    //   #|foo          ;rune
     //
-    //   #n#=DATUM   ;datum with numeric label
+    //   #|n#[=DATUM]   ;datum label, with or without datum
     //
-    //   #n#         ;reference to datum label
+    //   #|;DATUM       ;datum comment
     //
-    //   #|;DATUM    ;datum comment
-    //
-    //   #|DATUM     ;hash-datum
+    //   #|DATUM        ;hash-datum
     //
 
     if (s.eof()) {
@@ -507,29 +514,17 @@ fn handleHash(s: *State) *State {
         return err(s, "whitespace after hash");
     }
 
-    // Is it a rune?  #foo
     switch (s.peek()) {
         'a'...'z', 'A'...'Z' => return handleRune(s),
-        else => {},
-    }
-
-    // Is it a datum label / reference?
-    switch (s.peek()) {
         '0'...'9' => return handleDatumLabel(s),
-        else => {},
+        ';' => {
+            s.skip();
+            // Don't change s.next in this case.  Just let the parser redo what
+            // it was doing as soon as the commented-out datum has been read.
+            return s.recurParse(.start_datum, s.next);
+        },
+        else => return s.recurParse(.start_datum, .end_hash_datum),
     }
-
-    // Is it a datum comment?  #;DATUM
-    if (s.peek() == ';') {
-        s.skip();
-        // Don't change s.next in this case.  Just let the parser try to redo
-        // what it was doing as soon as the commented-out datum has been read.
-        return s.recurParse(.start_datum, s.next);
-    }
-
-    // Otherwise, it must be a hash-datum.  #DATUM
-
-    return s.recurParse(.start_datum, .end_hash_datum);
 }
 
 fn handleRune(s: *State) *State {
@@ -560,7 +555,7 @@ fn handleDatumLabel(s: *State) *State {
 
     if (s.eof() or s.isWhitespace()) {
         const rune = value.rune.pack("LABEL");
-        return s.returnDatum(value.pair.cons(rune, n));
+        return endDatum(s, value.pair.cons(rune, n));
     }
 
     if (s.getc() != '=') {
@@ -568,22 +563,22 @@ fn handleDatumLabel(s: *State) *State {
     }
 
     s.context = n;
-    return s.recurParse(.start_datum, .end_datum_label);
+    return s.recurParse(.start_datum, .end_label_datum);
 }
 
 fn readDatumLabel(s: *State) ?Value {
     return readShortString(s, std.ascii.isDigit, value.sstr.pack);
 }
 
-fn endDatumLabel(s: *State) *State {
+fn endLabelDatum(s: *State) *State {
     const rune = value.rune.pack("LABEL");
     const payload = value.pair.cons(s.context, s.retval);
-    return s.returnDatum(value.pair.cons(rune, payload));
+    return endDatum(s, value.pair.cons(rune, payload));
 }
 
 fn endHashDatum(s: *State) *State {
     const rune = value.rune.pack("HASH");
-    return s.returnDatum(value.pair.cons(rune, s.retval));
+    return endDatum(s, value.pair.cons(rune, s.retval));
 }
 
 fn startQuotedString(s: *State) *State {
@@ -591,7 +586,7 @@ fn startQuotedString(s: *State) *State {
     s.skip();
 
     const str = readQuotedString(s) catch return err(s, "unclosed string");
-    return s.returnDatum(str);
+    return endDatum(s, str);
 }
 
 // RQS = Read Quoted String
@@ -611,7 +606,7 @@ fn readQuotedSstr(s: *State) !?Value {
         const c = s.getc();
         if (c == '"') {
             // ok, return what we accumulated
-            return value.sstr.packLiteral(buf[0..i]);
+            return value.sstr.packQuoted(buf[0..i]);
         }
         if (i == 6) {
             // failed; reset and bail out
@@ -637,7 +632,7 @@ fn startBareString(s: *State) *State {
 fn readBareSstr(s: *State) ?*State {
     const sp = s.pos();
     if (readShortString(s, isSstrChar, value.sstr.pack)) |sstr| {
-        return s.returnDatum(sstr);
+        return endDatum(s, sstr);
     } else {
         s.resetPos(sp);
         return null;
@@ -666,11 +661,11 @@ fn startQuote(s: *State) *State {
         ',' => "COMMA",
         else => unreachable,
     });
-    return s.recurParse(.start_datum, .end_quote);
+    return s.recurParse(.start_datum, .end_quote_datum);
 }
 
-fn endQuote(s: *State) *State {
-    return s.returnDatum(value.pair.cons(s.context, s.retval));
+fn endQuoteDatum(s: *State) *State {
+    return endDatum(s, value.pair.cons(s.context, s.retval));
 }
 
 // List processing is, unsurprisingly, the most complicated, and it's made even
@@ -689,7 +684,7 @@ fn startList(s: *State) *State {
     }
 
     s.context = value.nil.nil;
-    s.opening_bracket = open;
+    s.char_context = open;
     return if (isEndOfList(s))
         endList(s)
     else
@@ -704,19 +699,19 @@ fn isEndOfList(s: *State) bool {
 }
 
 fn endList(s: *State) *State {
-    const open = s.opening_bracket;
+    const open = s.char_context;
     const char = s.getc();
 
     if (open == '(' and char == ')') {
-        return s.returnDatum(s.context);
+        return endDatum(s, s.context);
     }
     if (open == '[' and char == ']') {
         const rune = value.rune.pack("SQUARE");
-        return s.returnDatum(value.pair.cons(rune, s.context));
+        return endDatum(s, value.pair.cons(rune, s.context));
     }
     if (open == '{' and char == '}') {
         const rune = value.rune.pack("BRACE");
-        return s.returnDatum(value.pair.cons(rune, s.context));
+        return endDatum(s, value.pair.cons(rune, s.context));
     }
 
     return err(s, "wrong closing bracket for list");

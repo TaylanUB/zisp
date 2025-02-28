@@ -5,7 +5,7 @@ const Value = value.Value;
 // Zig API
 
 pub fn check(v: Value) bool {
-    return v.isOther(.char);
+    return v.isOtherTag(.char);
 }
 
 pub fn assert(v: Value) void {

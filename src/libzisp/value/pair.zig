@@ -9,7 +9,7 @@ const Value = value.Value;
 // Zig API
 
 pub fn check(v: Value) bool {
-    return ptr.checkZisp(v, .pair);
+    return ptr.checkZispTag(v, .pair);
 }
 
 pub fn assert(v: Value) void {

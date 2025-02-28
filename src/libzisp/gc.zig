@@ -1,15 +1,12 @@
 const std = @import("std");
 
-const Value = @import("value.zig").Value;
+const value = @import("value.zig");
+
+const Hval = value.Hval;
 
 var _gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
 const gpa = _gpa.allocator();
 
-pub const Bucket = packed union {
-    bits: u64,
-    value: Value,
-};
-
-pub fn alloc(count: usize) []Bucket {
-    return gpa.alloc(Bucket, count) catch @panic("OOM");
+pub fn alloc(count: usize) []Hval {
+    return gpa.alloc(Hval, count) catch @panic("OOM");
 }

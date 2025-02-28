@@ -165,7 +165,9 @@ const FILL = 0x7ff;
 // Used when dealing with runes and short strings.
 pub const ShortString = std.BoundedArray(u8, 6);
 
-pub const OtherTag = enum(u3) { rune, sstr, sstr_lit, char, misc };
+pub const OtherTag = enum(u3) { rune, sstr, qstr, char, misc };
+
+pub const MiscValue = enum(u8) { f, t, nil, eof, undef = 255 };
 
 /// Represents a Zisp value/object.
 pub const Value = packed union {
@@ -266,7 +268,7 @@ pub const Value = packed union {
 
     /// For initializing and reading misc values aka singletons.
     misc: packed struct {
-        value: u8,
+        value: MiscValue,
         _reserved: u40 = 0,
         _tag: OtherTag = .misc,
         _is_ptr: bool = false,
@@ -274,11 +276,9 @@ pub const Value = packed union {
         _is_fixnum: bool = false,
     },
 
-    const Self = @This();
-
     /// Hexdumps the value.
-    pub fn dump(self: Self) void {
-        std.debug.dumpHex(std.mem.asBytes(&self));
+    pub inline fn dump(v: Value) void {
+        std.debug.dumpHex(std.mem.asBytes(&v));
     }
 
     // The following aren't type predicates per se, but rather determine which
@@ -286,32 +286,37 @@ pub const Value = packed union {
     // since those aren't sub-categorized into further types.
 
     /// Checks for a Zisp double, including: +nan.0, -nan.0, +inf.0, -inf.0
-    pub fn isDouble(self: Self) bool {
-        return self.ieee.exp != FILL or self.ieee.rest == 0;
+    pub inline fn isDouble(v: Value) bool {
+        return v.ieee.exp != FILL or v.ieee.rest == 0;
     }
 
     /// Checks for a non-double Zisp value packed into a NaN.
-    pub fn isPacked(self: Self) bool {
-        return !self.isDouble();
+    pub inline fn isPacked(v: Value) bool {
+        return !v.isDouble();
     }
 
     /// Checks for a fixnum.
-    pub fn isFixnum(self: Self) bool {
-        return self.isPacked() and self.ieee.sign;
+    pub inline fn isFixnum(v: Value) bool {
+        return v.isPacked() and v.ieee.sign;
     }
 
     /// Checks for any kind of pointer.
-    pub fn isPtr(self: Self) bool {
-        return self.isPacked() and !self.ieee.sign and self.ieee.quiet;
+    pub inline fn isPtr(v: Value) bool {
+        return v.isPacked() and !v.ieee.sign and v.ieee.quiet;
     }
 
     /// Checks for a non-double, non-fixnum, non-pointer Zisp value.
-    fn _isOther(self: Self) bool {
-        return self.isPacked() and !self.ieee.sign and !self.ieee.quiet;
+    pub inline fn isOther(v: Value) bool {
+        return v.isPacked() and !v.ieee.sign and !v.ieee.quiet;
     }
 
-    /// Checks for any "other" type of value.
-    pub fn isOther(self: Self, tag: OtherTag) bool {
-        return self._isOther() and self.other.tag == tag;
+    /// Checks for an other type of value based on tag.
+    pub inline fn isOtherTag(v: Value, tag: OtherTag) bool {
+        return v.isOther() and v.other.tag == tag;
     }
+};
+
+/// A "heap value" that could be a Value or object header.
+pub const Hval = packed union {
+    value: Value,
 };

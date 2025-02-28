@@ -8,7 +8,7 @@ const Value = value.Value;
 // Zig API
 
 pub fn check(v: Value) bool {
-    return v.isOther(.rune);
+    return v.isOtherTag(.rune);
 }
 
 pub fn assert(v: Value) void {
@@ -50,15 +50,12 @@ pub fn pack(s: []const u8) Value {
 }
 
 pub fn unpack(v: Value) ShortString {
-    var s = ShortString{ .buffer = @bitCast(v.sstr.string) };
+    assert(v);
+    const s: [6]u8 = @bitCast(v.rune.name);
     inline for (0..6) |i| {
-        if (s.buffer[i] == 0) {
-            s.len = i;
-            return s;
-        }
+        if (s[i] == 0) return .{ .buffer = s, .len = i };
     }
-    s.len = 6;
-    return s;
+    return .{ .buffer = s, .len = 6 };
 }
 
 // Zisp API

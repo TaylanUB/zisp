@@ -2,8 +2,8 @@ const std = @import("std");
 const value = @import("../value.zig");
 const gc = @import("../gc.zig");
 
-const Bucket = gc.Bucket;
 const Value = value.Value;
+const Hval = value.Hval;
 
 // Zig API
 
@@ -42,19 +42,19 @@ pub fn unpackForeign(v: Value) u50 {
 
 // Zisp Pointers
 
-fn _checkZisp(v: Value) bool {
+pub fn checkZisp(v: Value) bool {
     return check(v) and !v.ptr.is_foreign;
 }
 
-fn _assertZisp(v: Value) void {
-    if (!_checkZisp(v)) {
+pub fn assertZisp(v: Value) void {
+    if (!checkZisp(v)) {
         v.dump();
         @panic("not zisp pointer");
     }
 }
 
 pub fn checkWeak(v: Value) bool {
-    return _checkZisp(v) and v.zptr.is_weak;
+    return checkZisp(v) and v.zptr.is_weak;
 }
 
 pub fn assertWeak(v: Value) void {
@@ -64,19 +64,19 @@ pub fn assertWeak(v: Value) void {
     }
 }
 
-pub fn checkZisp(v: Value, tag: Tag) bool {
-    return _checkZisp(v) and unpack(v).@"1" == tag;
+pub fn checkZispTag(v: Value, tag: Tag) bool {
+    return checkZisp(v) and unpack(v).@"1" == tag;
 }
 
-pub fn assertZisp(v: Value, tag: Tag) void {
-    if (!checkZisp(v, tag)) {
+pub fn assertZispTag(v: Value, tag: Tag) void {
+    if (!checkZispTag(v, tag)) {
         v.dump();
         @panic("not zisp pointer or wrong tag");
     }
 }
 
 pub fn checkStrong(v: Value) bool {
-    return _checkZisp(v) and !v.zptr.is_weak;
+    return checkZisp(v) and !v.zptr.is_weak;
 }
 
 pub fn assertStrong(v: Value) void {
@@ -86,24 +86,24 @@ pub fn assertStrong(v: Value) void {
     }
 }
 
-pub fn packZisp(ptr: [*]Bucket, tag: Tag, is_weak: bool) Value {
+pub fn packZisp(ptr: [*]Hval, tag: Tag, is_weak: bool) Value {
     return .{ .zptr = .{
         .tagged_value = tagPtr(ptr, tag),
         .is_weak = is_weak,
     } };
 }
 
-pub fn pack(ptr: [*]Bucket, tag: Tag) Value {
+pub fn pack(ptr: [*]Hval, tag: Tag) Value {
     return packZisp(ptr, tag, false);
 }
 
-pub fn packWeak(ptr: [*]Bucket, tag: Tag) Value {
+pub fn packWeak(ptr: [*]Hval, tag: Tag) Value {
     return packZisp(ptr, tag, true);
 }
 
 // Unpacks weak as well; no need for a separate fn.
-pub fn unpack(v: Value) struct { [*]Bucket, Tag } {
-    _assertZisp(v);
+pub fn unpack(v: Value) struct { [*]Hval, Tag } {
+    assertZisp(v);
     return untagPtr(v.zptr.tagged_value);
 }
 
@@ -117,37 +117,27 @@ pub fn isWeakNull(v: Value) bool {
     return v.zptr.tagged_value == 0;
 }
 
-fn tagPtr(ptr: [*]Bucket, tag: Tag) u48 {
+fn tagPtr(ptr: [*]Hval, tag: Tag) u48 {
     const int: usize = @intFromPtr(ptr);
     const untagged: u48 = @intCast(int);
     return untagged | @intFromEnum(tag);
 }
 
-fn untagPtr(tagged: u48) struct { [*]Bucket, Tag } {
+fn untagPtr(tagged: u48) struct { [*]Hval, Tag } {
     const untagged: u48 = tagged & 0xfffffffffff8;
-    const ptr: [*]Bucket = @ptrFromInt(untagged);
+    const ptr: [*]Hval = @ptrFromInt(untagged);
     const int: u3 = @truncate(tagged);
     const tag: Tag = @enumFromInt(int);
     return .{ ptr, tag };
 }
 
 pub const Tag = enum(u3) {
-    /// 0. Strings / Symbols
-    string,
-    /// 1. Bignums / Ratnums
-    number,
-    /// 2. Pairs ([2]Value)
+    /// *[2]Value
     pair,
-    /// 3. Collections: Vector, table, etc.
-    coll,
-    /// 4. OOP: Classes, instances, etc.
-    oop,
-    /// 5. String buffers
-    text,
-    /// 6. Procedures
+    /// Interned string (symbol)
+    istr,
+    /// Procedure
     proc,
-    /// 7. Others
-    other,
 };
 
 // Zisp API
