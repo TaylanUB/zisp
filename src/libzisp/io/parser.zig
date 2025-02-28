@@ -234,50 +234,66 @@ const value = @import("../value.zig");
 const ShortString = value.ShortString;
 const Value = value.Value;
 
-const TopState = struct {
-    alloc: std.mem.Allocator,
-    input: []const u8,
-    pos: usize = 0,
+const Context = struct {
+    // What to do next.
+    next: Fn = .start_parse,
+    // For storing some context value, like accumulated list elements.
+    val: Value = undefined,
+    // For storing some context char, like opening bracket.
+    char: u8 = undefined,
 };
 
 const State = struct {
-    top: *TopState,
+    input: []const u8,
+    pos: usize = 0,
 
-    next: Fn = .start_parse,
-    parent: ?*State = null,
+    context: Context = .{},
+    stack: std.ArrayList(Context),
     retval: Value = undefined,
 
-    // To store a value for context, such as a list of accumulated elements.
-    context: Value = undefined,
+    fn init(input: []const u8, alloc: std.mem.Allocator) State {
+        return .{ .input = input, .stack = .init(alloc) };
+    }
 
-    // To store a character for context, such as the type of opening bracket.
-    char_context: u8 = undefined,
+    fn deinit(s: *State) void {
+        s.stack.deinit();
+    }
+
+    fn recurParse(s: *State, start: Fn, end: Fn) void {
+        s.stack.append(.{
+            .next = end,
+            .val = s.context.val,
+            .char = s.context.char,
+        }) catch @panic("OOM");
+        s.context.next = start;
+    }
+
+    fn returnDatum(s: *State, val: Value) void {
+        s.retval = val;
+        if (s.stack.pop()) |c| {
+            s.context = c;
+        } else {
+            s.context.next = .done;
+        }
+    }
 
     fn eof(s: *State) bool {
-        return s.top.pos >= s.top.input.len;
+        return s.pos >= s.input.len;
     }
 
     fn peek(s: *State) u8 {
-        return s.top.input[s.top.pos];
+        return s.input[s.pos];
     }
 
     fn skip(s: *State) void {
-        // std.debug.print("{c}\n", .{s.top.input[s.top.pos]});
-        s.top.pos += 1;
+        // std.debug.print("{c}\n", .{s.input[s.pos]});
+        s.pos += 1;
     }
 
     fn getc(s: *State) u8 {
         const c = s.peek();
         s.skip();
         return c;
-    }
-
-    fn pos(s: *State) usize {
-        return s.top.pos;
-    }
-
-    fn resetPos(s: *State, p: usize) void {
-        s.top.pos = p;
     }
 
     // Consumes whitespace and line comments.
@@ -304,33 +320,6 @@ const State = struct {
             '\t', '\n', ' ' => true,
             else => false,
         };
-    }
-
-    fn recurParse(s: *State, start_from: Fn, return_to: Fn) *State {
-        const newState = s.top.alloc.create(State) catch @panic("OOM");
-        newState.* = .{
-            .top = s.top,
-            .next = start_from,
-            .parent = s,
-        };
-        s.next = return_to;
-        return newState;
-    }
-
-    fn returnDatum(s: *State, val: Value) *State {
-        s.retval = val;
-        s.next = .perform_return;
-        return s;
-    }
-
-    fn performReturn(s: *State) ?*State {
-        if (s.parent) |parent| {
-            parent.retval = s.retval;
-            s.top.alloc.destroy(s);
-            return parent;
-        } else {
-            return null;
-        }
     }
 };
 
@@ -363,36 +352,35 @@ const Fn = enum {
     continue_list,
     finish_improper_list,
     end_improper_list,
-    perform_return,
+    done,
 };
 
 pub fn parse(input: []const u8) Value {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer if (gpa.deinit() == .leak) @panic("leak");
-    const alloc = gpa.allocator();
-    // var pool: std.heap.MemoryPool(State) = .init(alloc);
-    // defer pool.deinit();
-    var top = TopState{ .alloc = alloc, .input = input };
-    var s0 = State{ .top = &top };
-    var s = &s0;
-    while (true) {
-        // std.debug.print("{}\n", .{s.next});
-        s = switch (s.next) {
-            .start_parse => startParse(s),
-            .start_datum => startDatum(s),
-            .end_join_datum => endJoinedDatum(s),
-            .end_label_datum => endLabelDatum(s),
-            .end_hash_datum => endHashDatum(s),
-            .end_quote_datum => endQuoteDatum(s),
-            .continue_list => continueList(s),
-            .finish_improper_list => finishImproperList(s),
-            .end_improper_list => endImproperList(s),
-            .perform_return => s.performReturn() orelse return s.retval,
-        };
+    var s: State = .init(input, gpa.allocator());
+    defer s.deinit();
+    while (s.context.next != .done) call(&s);
+    return s.retval;
+}
+
+fn call(s: *State) void {
+    // std.debug.print("{}\n", .{s.next});
+    switch (s.context.next) {
+        .start_parse => startParse(s),
+        .start_datum => startDatum(s),
+        .end_join_datum => endJoinedDatum(s),
+        .end_label_datum => endLabelDatum(s),
+        .end_hash_datum => endHashDatum(s),
+        .end_quote_datum => endQuoteDatum(s),
+        .continue_list => continueList(s),
+        .finish_improper_list => finishImproperList(s),
+        .end_improper_list => endImproperList(s),
+        .done => unreachable,
     }
 }
 
-fn startParse(s: *State) *State {
+fn startParse(s: *State) void {
     s.consumeBlanks();
     if (s.eof()) {
         return s.returnDatum(value.eof.eof);
@@ -407,7 +395,7 @@ fn startParse(s: *State) *State {
 
 // This is called when we *immediately* expect a datum and nothing else; for
 // example, no whitespace or comments, because they've already been consumed.
-fn startDatum(s: *State) *State {
+fn startDatum(s: *State) void {
     if (s.eof()) {
         return err(s, "expected datum, got EOF");
     }
@@ -436,7 +424,7 @@ fn startDatum(s: *State) *State {
     };
 }
 
-fn endDatum(s: *State, d: Value) *State {
+fn endDatum(s: *State, d: Value) void {
     //
     // We're at the end of a datum; check for the various ways data can be
     // joined together, like DATUM|DATUM or DATUM|.DATUM etc.
@@ -458,20 +446,20 @@ fn endDatum(s: *State, d: Value) *State {
         },
         else => {},
     }
-    s.context = d;
-    s.char_context = c;
+    s.context.val = d;
+    s.context.char = c;
     return s.recurParse(.start_datum, .end_join_datum);
 }
 
 fn checkTrailingDatumComment(s: *State) bool {
-    const pos = s.pos();
+    const pos = s.pos;
     s.skip();
     if (s.eof()) {
         // Error, but let it be handled later.
         return false;
     }
     const c = s.peek();
-    s.resetPos(pos);
+    s.pos = pos;
     return c == ';';
 }
 
@@ -482,18 +470,18 @@ fn isEndOfDatum(s: *State) bool {
     };
 }
 
-fn endJoinedDatum(s: *State) *State {
-    const rune = value.rune.pack(switch (s.char_context) {
+fn endJoinedDatum(s: *State) void {
+    const rune = value.rune.pack(switch (s.context.char) {
         '.' => "DOT",
         ':' => "COLON",
         '|' => "PIPE",
         else => "JOIN",
     });
-    const joined = value.pair.cons(s.context, s.retval);
+    const joined = value.pair.cons(s.context.val, s.retval);
     return endDatum(s, value.pair.cons(rune, joined));
 }
 
-fn handleHash(s: *State) *State {
+fn handleHash(s: *State) void {
     s.skip();
     //
     // We just consumed a hash.  Possibilities include:
@@ -519,15 +507,15 @@ fn handleHash(s: *State) *State {
         '0'...'9' => return handleDatumLabel(s),
         ';' => {
             s.skip();
-            // Don't change s.next in this case.  Just let the parser redo what
-            // it was doing as soon as the commented-out datum has been read.
-            return s.recurParse(.start_datum, s.next);
+            // Don't change next in this case.  Just let the parser redo what it
+            // was doing as soon as the commented-out datum has been read.
+            return s.recurParse(.start_datum, s.context.next);
         },
         else => return s.recurParse(.start_datum, .end_hash_datum),
     }
 }
 
-fn handleRune(s: *State) *State {
+fn handleRune(s: *State) void {
     const r = readRune(s) orelse return err(s, "rune too long");
     return endDatum(s, r);
 }
@@ -536,7 +524,7 @@ fn readRune(s: *State) ?Value {
     return readShortString(s, std.ascii.isAlphanumeric, value.rune.pack);
 }
 
-fn handleDatumLabel(s: *State) *State {
+fn handleDatumLabel(s: *State) void {
     const n = readDatumLabel(s) orelse return err(s, "datum label too long");
     //
     // We're at the end of the numeric label now; possibilities are:
@@ -562,7 +550,7 @@ fn handleDatumLabel(s: *State) *State {
         return err(s, "invalid character after numeric datum label");
     }
 
-    s.context = n;
+    s.context.val = n;
     return s.recurParse(.start_datum, .end_label_datum);
 }
 
@@ -570,18 +558,18 @@ fn readDatumLabel(s: *State) ?Value {
     return readShortString(s, std.ascii.isDigit, value.sstr.pack);
 }
 
-fn endLabelDatum(s: *State) *State {
+fn endLabelDatum(s: *State) void {
     const rune = value.rune.pack("LABEL");
-    const payload = value.pair.cons(s.context, s.retval);
+    const payload = value.pair.cons(s.context.val, s.retval);
     return endDatum(s, value.pair.cons(rune, payload));
 }
 
-fn endHashDatum(s: *State) *State {
+fn endHashDatum(s: *State) void {
     const rune = value.rune.pack("HASH");
     return endDatum(s, value.pair.cons(rune, s.retval));
 }
 
-fn startQuotedString(s: *State) *State {
+fn startQuotedString(s: *State) void {
     // We're at |"..." so consume the opening quote before we start reading.
     s.skip();
 
@@ -597,7 +585,7 @@ fn readQuotedString(s: *State) !Value {
 }
 
 fn readQuotedSstr(s: *State) !?Value {
-    const start_pos = s.pos();
+    const start_pos = s.pos;
 
     // TODO: Handle escapes.
     var buf: [6]u8 = undefined;
@@ -610,7 +598,7 @@ fn readQuotedSstr(s: *State) !?Value {
         }
         if (i == 6) {
             // failed; reset and bail out
-            s.resetPos(start_pos);
+            s.pos = start_pos;
             return null;
         }
         // ok, save this byte and go on
@@ -624,17 +612,17 @@ fn readQuotedLongString(s: *State) Value {
     return err(s, "NOT YET IMPLEMENTED");
 }
 
-fn startBareString(s: *State) *State {
+fn startBareString(s: *State) void {
     // We're at |foo so start reading directly.
     return readBareSstr(s) orelse readBareLongString(s);
 }
 
-fn readBareSstr(s: *State) ?*State {
-    const sp = s.pos();
+fn readBareSstr(s: *State) ?void {
+    const sp = s.pos;
     if (readShortString(s, isSstrChar, value.sstr.pack)) |sstr| {
         return endDatum(s, sstr);
     } else {
-        s.resetPos(sp);
+        s.pos = sp;
         return null;
     }
 }
@@ -649,13 +637,13 @@ fn isSstrChar(c: u8) bool {
     };
 }
 
-fn readBareLongString(s: *State) *State {
+fn readBareLongString(s: *State) void {
     return err(s, "NOT YET IMPLEMENTED");
 }
 
-fn startQuote(s: *State) *State {
+fn startQuote(s: *State) void {
     // We're at one of:  |'...  |`...  |,...
-    s.context = value.rune.pack(switch (s.getc()) {
+    s.context.val = value.rune.pack(switch (s.getc()) {
         '\'' => "QUOTE",
         '`' => "GRAVE",
         ',' => "COMMA",
@@ -664,8 +652,8 @@ fn startQuote(s: *State) *State {
     return s.recurParse(.start_datum, .end_quote_datum);
 }
 
-fn endQuoteDatum(s: *State) *State {
-    return endDatum(s, value.pair.cons(s.context, s.retval));
+fn endQuoteDatum(s: *State) void {
+    return endDatum(s, value.pair.cons(s.context.val, s.retval));
 }
 
 // List processing is, unsurprisingly, the most complicated, and it's made even
@@ -675,7 +663,7 @@ fn endQuoteDatum(s: *State) *State {
 // that an arbitrary number of datum comments, separated by blanks (whitespace
 // and line comments) are handled automatically.
 
-fn startList(s: *State) *State {
+fn startList(s: *State) void {
     const open = s.getc();
 
     s.consumeBlanks();
@@ -683,8 +671,8 @@ fn startList(s: *State) *State {
         return err(s, "unexpected EOF while parsing list");
     }
 
-    s.context = value.nil.nil;
-    s.char_context = open;
+    s.context.val = value.nil.nil;
+    s.context.char = open;
     return if (isEndOfList(s))
         endList(s)
     else
@@ -698,28 +686,28 @@ fn isEndOfList(s: *State) bool {
     };
 }
 
-fn endList(s: *State) *State {
-    const open = s.char_context;
+fn endList(s: *State) void {
+    const open = s.context.char;
     const char = s.getc();
 
     if (open == '(' and char == ')') {
-        return endDatum(s, s.context);
+        return endDatum(s, s.context.val);
     }
     if (open == '[' and char == ']') {
         const rune = value.rune.pack("SQUARE");
-        return endDatum(s, value.pair.cons(rune, s.context));
+        return endDatum(s, value.pair.cons(rune, s.context.val));
     }
     if (open == '{' and char == '}') {
         const rune = value.rune.pack("BRACE");
-        return endDatum(s, value.pair.cons(rune, s.context));
+        return endDatum(s, value.pair.cons(rune, s.context.val));
     }
 
     return err(s, "wrong closing bracket for list");
 }
 
-fn continueList(s: *State) *State {
+fn continueList(s: *State) void {
     // Note that this accumulates list elements in reverse.
-    s.context = value.pair.cons(s.retval, s.context);
+    s.context.val = value.pair.cons(s.retval, s.context.val);
 
     s.consumeBlanks();
     if (s.eof()) {
@@ -727,7 +715,7 @@ fn continueList(s: *State) *State {
     }
 
     if (isEndOfList(s)) {
-        s.context = lib.list.reverse(s.context);
+        s.context.val = lib.list.reverse(s.context.val);
         return endList(s);
     }
 
@@ -743,8 +731,8 @@ fn continueList(s: *State) *State {
     return s.recurParse(.start_parse, .continue_list);
 }
 
-fn finishImproperList(s: *State) *State {
-    s.context = lib.list.reverseWithTail(s.context, s.retval);
+fn finishImproperList(s: *State) void {
+    s.context.val = lib.list.reverseWithTail(s.context.val, s.retval);
     return endImproperList(s);
 }
 
@@ -752,7 +740,7 @@ fn finishImproperList(s: *State) *State {
 // datum comments *after* the final cdr, where we don't actually want to parse
 // any further data.  So we keep looping here just looking for datum comments.
 
-fn endImproperList(s: *State) *State {
+fn endImproperList(s: *State) void {
     s.consumeBlanks();
     if (s.eof()) {
         return err(s, "unexpected EOF at end of improper list");
@@ -776,6 +764,6 @@ fn endImproperList(s: *State) *State {
 
 fn err(s: *State, msg: []const u8) noreturn {
     std.debug.print("{s}\n", .{msg});
-    std.debug.print("pos: {}\n", .{s.pos()});
+    std.debug.print("pos: {}\n", .{s.pos});
     @panic("parse error");
 }
