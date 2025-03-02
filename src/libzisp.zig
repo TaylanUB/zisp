@@ -299,9 +299,14 @@ test "parse4" {
 }
 
 test "parse bench" {
+    const iters = switch (@import("builtin").mode) {
+        .Debug, .ReleaseSmall => 1000,
+        .ReleaseSafe => 10_000,
+        .ReleaseFast => 100_000,
+    };
     var timer = try std.time.Timer.start();
     std.mem.doNotOptimizeAway(timer.lap());
-    for (0..1000) |i| {
+    for (0..iters) |i| {
         _ = i;
         std.mem.doNotOptimizeAway(io.parser.parse(
             \\(a b c (x y z (a b c (x y z (a b c (x y z (a b c (x y z (a b c
@@ -311,7 +316,7 @@ test "parse bench" {
     }
     const ns: f64 = @floatFromInt(timer.lap());
     const secs = ns / 1_000_000_000;
-    std.debug.print("parse: {d:.3}s\n", .{secs});
+    std.debug.print("parse {} times: {d:.3}s\n", .{ iters, secs });
 }
 
 test "unparse" {

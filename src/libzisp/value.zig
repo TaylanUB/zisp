@@ -169,6 +169,8 @@ pub const OtherTag = enum(u3) { rune, sstr, qstr, char, misc };
 
 pub const MiscValue = enum(u8) { f, t, nil, eof, undef = 255 };
 
+pub const undef = Value{ .misc = .{ .value = .undef } };
+
 /// Represents a Zisp value/object.
 pub const Value = packed union {
     /// To get the value as a regular double.
