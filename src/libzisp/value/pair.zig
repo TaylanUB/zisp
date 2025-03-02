@@ -26,10 +26,7 @@ pub fn pred(v: Value) Value {
 }
 
 pub fn cons(v1: Value, v2: Value) Value {
-    const mem = gc.alloc(2);
-    mem[0] = .{ .value = v1 };
-    mem[1] = .{ .value = v2 };
-    return ptr.pack(mem.ptr, .pair);
+    return ptr.pack(@ptrCast(gc.cons(v1, v2)), .pair);
 }
 
 fn getMem(v: Value) *[2]Value {
