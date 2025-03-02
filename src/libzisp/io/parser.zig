@@ -149,42 +149,28 @@
 //
 // === Implementation details ===
 //
-// Instead of using recursion directly, the parser is written in something akin
-// to a manual continuation-passing style, which ensures that parsing depth is
-// not limited by the stack size.  This is also called "trampolining."
+// Instead of using recursion directly, the parser is written in a "trampoline"
+// style, which ensures that parsing depth is not limited by the stack size.
 //
-// All state/context is passed around via a struct pointer.  The parser has a
-// main loop which calls a function, passing it the state, and also expects a
-// state pointer in return.
+// All state and context is passed around via a struct pointer.  The parser has
+// a main loop, which calls a function as dictated by state.context.next, and
+// the function may update the state to have another function called next.
 //
-// The state has a .next field, that indicates which function the main loop
-// should call next.  It also has a .parent field, potentially linking to a
-// previous state.  These two fields are used as follows:
+// If a function wants to call the parser recursively, it pushes some of the
+// current context onto a stack, including what function the recursive parser
+// should "return" to, and then updates the state to instruct the main loop to
+// call one of the starting functions.
 //
-// If a function wants to call the parser recursively, it sets the .next field
-// of the *current* state to where the recursive call should return to.  Then,
-// it creates a new state, sets the .next field of that one to where it should
-// start (either .start_parse or .start_datum), sets .parent to the old state,
-// and returns the new one.
-//
-// So, the main loop will now do what the newly returned state is instructing.
-//
-// If a function wants to make the parser return from this recursive parsing
-// routine, it sets the .retval field of the current state, and sets .next to
-// the special .perform_return instruction.  This makes the main loop copy the
-// value in .retval into the .retval field of the parent state, and reinstates
-// it, continuing with whatever was put in its .next field, which should be a
-// function that will consume the return value.
-//
-// If .parent is null, the main loop returns .retval as the final result.
+// If a function wants to make the parser return, either from a recursive parse
+// or from the main loop, it sets the .retval field, and tries to pop the saved
+// context.  If the context stack was empty, the main loop returns.
 //
 // Some further notes:
 //
-// While it's possible to just set .next and return the current state, to make
-// the main loop call another function next (possibly even setting .retval to
-// pass a value to it), this is completely unnecessary.  A few non-recursive
-// function calls won't blow the stack.  It's only recursive parsing that we
-// need the above strategy for.
+// While it's possible to just set .next and return, to make the main loop call
+// another function next (possibly even setting .retval to pass a value to it),
+// this is completely unnecessary.  A few non-recursive calls won't blow the
+// stack.  It's only recursive parsing that we need the above strategy for.
 //
 // The difference between .start_parse and .start_datum is that the former will
 // allow whitespace and comments at the beginning, whereas the latter expects a
@@ -195,24 +181,19 @@
 // out of the way.  However, in some cases, we must use .start_parse instead.
 // This is because of datum comments.  When one appears, we start a recursive
 // parser, but instead of making it return to a function that will consume the
-// result, we make it return to the original state's starting point.  This way,
-// the parser "retries" what it was originally doing, with the comment out of
-// the way.  If we always used .start_datum for recursive parsing, this would
-// never allow whitespace *after* a datum comment, because we would be back at
-// .start_datum as soon as we reach the end of the datum comment.  Whitespace
-// after a datum comment is sometimes allowed and sometimes not, so there's no
-// generic solution that's always correct:
+// result, we make it return to the original starting point, so the result is
+// ignored and the parser retries what it was originally doing.  If we always
+// used .start_datum, this would never allow whitespace after a datum comment,
+// since we would be back at .start_datum after the comment is out of the way:
 //
-//   (foo #;bar baz)     ;; whitespace after #;bar allowed
-//
-//   #'#;(+ 1 2)(+ 3 4)  ;; whitespace after #;(+ 1 2) not allowed
+//   (foo #;bar baz)  ;must use .start_parse at the start of each element
 //
 // When it comes to pairs and lists, we basically treat everything as a list,
 // and a pair is just seen as the shortest possible improper list.  This saves
 // memory: If we implemented list parsing as pair parsing, we would be calling
 // the parser recursively, deeper and deeper, for every list element.  Though
 // we're not limited by stack space thanks to the strategy described above, it
-// would still waste memory by creating tons of new state objects.
+// would still waste memory and the time it takes to allocate memory.
 //
 //
 // === Notation used in comments ===
@@ -385,12 +366,12 @@ fn startParse(s: *State) void {
     if (s.eof()) {
         return s.returnDatum(value.eof.eof);
     }
-    return switch (s.peek()) {
+    switch (s.peek()) {
         // whitespace already consumed
         0...32, 127...255 => err(s, "invalid character"),
         ')', ']', '}' => err(s, "unexpected closing bracket"),
         else => startDatum(s),
-    };
+    }
 }
 
 // This is called when we *immediately* expect a datum and nothing else; for
@@ -402,7 +383,7 @@ fn startDatum(s: *State) void {
     if (s.isWhitespace()) {
         return err(s, "expected datum, got whitespace");
     }
-    return switch (s.peek()) {
+    switch (s.peek()) {
         // whitespace checked above
         0...32, 127...255 => err(s, "invalid character"),
 
@@ -421,7 +402,7 @@ fn startDatum(s: *State) void {
         '.' => err(s, "misplaced period"),
 
         else => startBareString(s),
-    };
+    }
 }
 
 fn endDatum(s: *State, d: Value) void {
@@ -448,7 +429,7 @@ fn endDatum(s: *State, d: Value) void {
     }
     s.context.val = d;
     s.context.char = c;
-    return s.recurParse(.start_datum, .end_join_datum);
+    s.recurParse(.start_datum, .end_join_datum);
 }
 
 fn checkTrailingDatumComment(s: *State) bool {
@@ -478,7 +459,7 @@ fn endJoinedDatum(s: *State) void {
         else => "JOIN",
     });
     const joined = value.pair.cons(s.context.val, s.retval);
-    return endDatum(s, value.pair.cons(rune, joined));
+    endDatum(s, value.pair.cons(rune, joined));
 }
 
 fn handleHash(s: *State) void {
@@ -503,21 +484,21 @@ fn handleHash(s: *State) void {
     }
 
     switch (s.peek()) {
-        'a'...'z', 'A'...'Z' => return handleRune(s),
-        '0'...'9' => return handleDatumLabel(s),
+        'a'...'z', 'A'...'Z' => handleRune(s),
+        '0'...'9' => handleDatumLabel(s),
         ';' => {
             s.skip();
             // Don't change next in this case.  Just let the parser redo what it
             // was doing as soon as the commented-out datum has been read.
-            return s.recurParse(.start_datum, s.context.next);
+            s.recurParse(.start_datum, s.context.next);
         },
-        else => return s.recurParse(.start_datum, .end_hash_datum),
+        else => s.recurParse(.start_datum, .end_hash_datum),
     }
 }
 
 fn handleRune(s: *State) void {
     const r = readRune(s) orelse return err(s, "rune too long");
-    return endDatum(s, r);
+    endDatum(s, r);
 }
 
 fn readRune(s: *State) ?Value {
@@ -551,7 +532,7 @@ fn handleDatumLabel(s: *State) void {
     }
 
     s.context.val = n;
-    return s.recurParse(.start_datum, .end_label_datum);
+    s.recurParse(.start_datum, .end_label_datum);
 }
 
 fn readDatumLabel(s: *State) ?Value {
@@ -561,12 +542,12 @@ fn readDatumLabel(s: *State) ?Value {
 fn endLabelDatum(s: *State) void {
     const rune = value.rune.pack("LABEL");
     const payload = value.pair.cons(s.context.val, s.retval);
-    return endDatum(s, value.pair.cons(rune, payload));
+    endDatum(s, value.pair.cons(rune, payload));
 }
 
 fn endHashDatum(s: *State) void {
     const rune = value.rune.pack("HASH");
-    return endDatum(s, value.pair.cons(rune, s.retval));
+    endDatum(s, value.pair.cons(rune, s.retval));
 }
 
 fn startQuotedString(s: *State) void {
@@ -574,7 +555,7 @@ fn startQuotedString(s: *State) void {
     s.skip();
 
     const str = readQuotedString(s) catch return err(s, "unclosed string");
-    return endDatum(s, str);
+    endDatum(s, str);
 }
 
 // RQS = Read Quoted String
@@ -608,21 +589,22 @@ fn readQuotedSstr(s: *State) !?Value {
     return error.Unclosed;
 }
 
-fn readQuotedLongString(s: *State) Value {
-    return err(s, "NOT YET IMPLEMENTED");
+fn readQuotedLongString(s: *State) !Value {
+    return err(s, "TODO: NOT YET IMPLEMENTED");
 }
 
 fn startBareString(s: *State) void {
     // We're at |foo so start reading directly.
-    return readBareSstr(s) orelse readBareLongString(s);
+    const str = readBareSstr(s) orelse readBareLongString(s);
+    endDatum(s, str);
 }
 
-fn readBareSstr(s: *State) ?void {
-    const sp = s.pos;
+fn readBareSstr(s: *State) ?Value {
+    const pos = s.pos;
     if (readShortString(s, isSstrChar, value.sstr.pack)) |sstr| {
-        return endDatum(s, sstr);
+        return sstr;
     } else {
-        s.pos = sp;
+        s.pos = pos;
         return null;
     }
 }
@@ -637,8 +619,8 @@ fn isSstrChar(c: u8) bool {
     };
 }
 
-fn readBareLongString(s: *State) void {
-    return err(s, "NOT YET IMPLEMENTED");
+fn readBareLongString(s: *State) Value {
+    return err(s, "TODO: NOT YET IMPLEMENTED");
 }
 
 fn startQuote(s: *State) void {
@@ -649,11 +631,11 @@ fn startQuote(s: *State) void {
         ',' => "COMMA",
         else => unreachable,
     });
-    return s.recurParse(.start_datum, .end_quote_datum);
+    s.recurParse(.start_datum, .end_quote_datum);
 }
 
 fn endQuoteDatum(s: *State) void {
-    return endDatum(s, value.pair.cons(s.context.val, s.retval));
+    endDatum(s, value.pair.cons(s.context.val, s.retval));
 }
 
 // List processing is, unsurprisingly, the most complicated, and it's made even
@@ -673,10 +655,11 @@ fn startList(s: *State) void {
 
     s.context.val = value.nil.nil;
     s.context.char = open;
-    return if (isEndOfList(s))
-        endList(s)
-    else
+    if (isEndOfList(s)) {
+        endList(s);
+    } else {
         s.recurParse(.start_parse, .continue_list);
+    }
 }
 
 fn isEndOfList(s: *State) bool {
@@ -702,7 +685,7 @@ fn endList(s: *State) void {
         return endDatum(s, value.pair.cons(rune, s.context.val));
     }
 
-    return err(s, "wrong closing bracket for list");
+    err(s, "wrong closing bracket for list");
 }
 
 fn continueList(s: *State) void {
@@ -728,12 +711,12 @@ fn continueList(s: *State) void {
         return s.recurParse(.start_parse, .finish_improper_list);
     }
 
-    return s.recurParse(.start_parse, .continue_list);
+    s.recurParse(.start_parse, .continue_list);
 }
 
 fn finishImproperList(s: *State) void {
     s.context.val = lib.list.reverseWithTail(s.context.val, s.retval);
-    return endImproperList(s);
+    endImproperList(s);
 }
 
 // Handling the end of an improper list is a bit awkward, because there may be
@@ -759,7 +742,7 @@ fn endImproperList(s: *State) void {
         }
     }
 
-    return err(s, "malformed list / extra datum at end of improper list");
+    err(s, "malformed list / extra datum at end of improper list");
 }
 
 fn err(s: *State, msg: []const u8) noreturn {
