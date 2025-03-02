@@ -215,6 +215,22 @@ const value = @import("../value.zig");
 const ShortString = value.ShortString;
 const Value = value.Value;
 
+const cons = value.pair.cons;
+
+// zig fmt: off
+const DOT    = value.rune.pack("DOT");
+const COLON  = value.rune.pack("COLON");
+const PIPE   = value.rune.pack("PIPE");
+const JOIN   = value.rune.pack("JOIN");
+const LABEL  = value.rune.pack("LABEL");
+const HASH   = value.rune.pack("HASH");
+const QUOTE  = value.rune.pack("QUOTE");
+const GRAVE  = value.rune.pack("GRAVE");
+const COMMA  = value.rune.pack("COMMA");
+const SQUARE = value.rune.pack("SQUARE");
+const BRACE  = value.rune.pack("BRACE");
+// zig fmt: on
+
 const Context = struct {
     // What to do next.
     next: Fn = .start_parse,
@@ -452,14 +468,13 @@ fn isEndOfDatum(s: *State) bool {
 }
 
 fn endJoinedDatum(s: *State) void {
-    const rune = value.rune.pack(switch (s.context.char) {
-        '.' => "DOT",
-        ':' => "COLON",
-        '|' => "PIPE",
-        else => "JOIN",
-    });
-    const joined = value.pair.cons(s.context.val, s.retval);
-    endDatum(s, value.pair.cons(rune, joined));
+    const rune = switch (s.context.char) {
+        '.' => DOT,
+        ':' => COLON,
+        '|' => PIPE,
+        else => JOIN,
+    };
+    endDatum(s, cons(rune, cons(s.context.val, s.retval)));
 }
 
 fn handleHash(s: *State) void {
@@ -523,8 +538,7 @@ fn handleDatumLabel(s: *State) void {
     }
 
     if (s.eof() or s.isWhitespace()) {
-        const rune = value.rune.pack("LABEL");
-        return endDatum(s, value.pair.cons(rune, n));
+        return endDatum(s, cons(LABEL, n));
     }
 
     if (s.getc() != '=') {
@@ -540,14 +554,11 @@ fn readDatumLabel(s: *State) ?Value {
 }
 
 fn endLabelDatum(s: *State) void {
-    const rune = value.rune.pack("LABEL");
-    const payload = value.pair.cons(s.context.val, s.retval);
-    endDatum(s, value.pair.cons(rune, payload));
+    endDatum(s, cons(LABEL, cons(s.context.val, s.retval)));
 }
 
 fn endHashDatum(s: *State) void {
-    const rune = value.rune.pack("HASH");
-    endDatum(s, value.pair.cons(rune, s.retval));
+    endDatum(s, cons(HASH, s.retval));
 }
 
 fn startQuotedString(s: *State) void {
@@ -625,17 +636,17 @@ fn readBareLongString(s: *State) Value {
 
 fn startQuote(s: *State) void {
     // We're at one of:  |'...  |`...  |,...
-    s.context.val = value.rune.pack(switch (s.getc()) {
-        '\'' => "QUOTE",
-        '`' => "GRAVE",
-        ',' => "COMMA",
+    s.context.val = switch (s.getc()) {
+        '\'' => QUOTE,
+        '`' => GRAVE,
+        ',' => COMMA,
         else => unreachable,
-    });
+    };
     s.recurParse(.start_datum, .end_quote_datum);
 }
 
 fn endQuoteDatum(s: *State) void {
-    endDatum(s, value.pair.cons(s.context.val, s.retval));
+    endDatum(s, cons(s.context.val, s.retval));
 }
 
 // List processing is, unsurprisingly, the most complicated, and it's made even
@@ -677,12 +688,10 @@ fn endList(s: *State) void {
         return endDatum(s, s.context.val);
     }
     if (open == '[' and char == ']') {
-        const rune = value.rune.pack("SQUARE");
-        return endDatum(s, value.pair.cons(rune, s.context.val));
+        return endDatum(s, cons(SQUARE, s.context.val));
     }
     if (open == '{' and char == '}') {
-        const rune = value.rune.pack("BRACE");
-        return endDatum(s, value.pair.cons(rune, s.context.val));
+        return endDatum(s, cons(BRACE, s.context.val));
     }
 
     err(s, "wrong closing bracket for list");
